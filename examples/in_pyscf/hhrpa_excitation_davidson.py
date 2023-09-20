@@ -40,27 +40,14 @@ Lpq = None
 Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo, ijslice, aosym='s2', out=Lpq)
 Lpq = Lpq.reshape(naux, nmo, nmo)
 
-# 1. simple ppRPA calculation
-pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq)
+# 1. hhRPA
+pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, channel="hh")
 pprpa.kernel("s")
 pprpa.kernel("t")
 pprpa.analyze()
 
-# 2. simple ppTDA calculation
-pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, TDA="pp")
-pprpa.kernel("s")
-pprpa.kernel("t")
-pprpa.analyze()
-
-# 3. only run singlet/triplet calculation
-pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq)
-pprpa.kernel("s")
-#pprpa.kernel("t")
-pprpa.analyze()
-
-# 4. full control parameters
-pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, nroot=15, max_vec=300,
-                       max_iter=100, residue_thresh=1.0e-8, print_thresh=0.2)
+# 2. hhTDA
+pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, channel="hh", TDA="hh")
 pprpa.kernel("s")
 pprpa.kernel("t")
 pprpa.analyze()
