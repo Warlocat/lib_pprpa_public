@@ -76,7 +76,7 @@ def diagonalize_pprpa_singlet(nocc, mo_energy, Lpq, nocc_act, nvir_act):
     C = C.transpose(2, 3, 0, 1)
 
     C = C.reshape(nocc_act*nocc_act, nocc_act*nocc_act)
-    orb_sum = numpy.asarray(mo_energy[nocc_fro:nocc_act, None] + mo_energy[None, nocc_fro:nocc_act]).reshape(-1)
+    orb_sum = numpy.asarray(mo_energy[nocc_fro:nocc, None] + mo_energy[None, nocc_fro:nocc_act]).reshape(-1)
     orb_sum -= 2.0 * mu
     numpy.fill_diagonal(C, C.diagonal() - orb_sum)
     C = C.reshape(nocc_act, nocc_act, nocc_act, nocc_act)
