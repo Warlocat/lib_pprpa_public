@@ -48,8 +48,9 @@ def get_pyscf_input_mol(mf, auxbasis=None, nocc_act=None, nvir_act=None):
     Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo, ijslice, aosym='s2', out=Lpq)
     Lpq = Lpq.reshape(naux, nmo_act, nmo_act)
 
+    print("\nget input for lib_pprpa from PySCF (molecule)")
     print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
-    print("nocc_act = %-d, nocc_act= %-d, nvir_act = %-d" % (nmo_act, nocc_act, nvir_act))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" % (nmo_act, nocc_act, nvir_act))
     print("naux = %-d" % naux)
 
     return nocc_act, mo_energy_act, Lpq
@@ -98,8 +99,9 @@ def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None):
         Lpq.append(tmp)
     Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
 
+    print("\nget input for lib_pprpa from PySCF (supercell)")
     print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
-    print("nocc_act = %-d, nocc_act= %-d, nvir_act = %-d" % (nmo_act, nocc_act, nvir_act))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" % (nmo_act, nocc_act, nvir_act))
     print("naux = %-d" % naux)
 
     return nocc_act, mo_energy_act, Lpq
