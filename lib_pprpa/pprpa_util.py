@@ -68,6 +68,28 @@ def get_chemical_potential(nocc, mo_energy):
     return mu
 
 
+def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act):
+    """Get basic input in active space.
+
+    Args:
+        nocc (int/int array): number of occupied orbitals.
+        mo_energy (double array/double ndarray): orbital energy.
+        Lpq (double ndarray): three-center density-fitting matrix in MO space.
+        nocc_act (int/int array): number of occupied orbitals.
+        nvir_act (int/int array): number of virtual orbitals.
+
+    Returns:
+        nocc_act (int/int array): number of occupied orbitals in active space.
+        mo_energy_act (double array/double ndarray): orbital energy in active space.
+        Lpq_act (double ndarray): three-center density-fitting matrix in MO space in active space.
+    """
+    assert mo_energy.shape[-1] == Lpq.shape[-1] == Lpq.shape[-2]
+    assert nocc <= mo_energy.shape[-1] and (nocc_act + nvir_act) <= mo_energy.shape[-1]
+    mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
+    Lpq_act = Lpq[:, (nocc-nocc_act):(nocc+nvir_act), (nocc-nocc_act):(nocc+nvir_act)]
+    return nocc_act, mo_energy_act, Lpq_act
+
+
 def print_citation():
     __version__ = "0.1"
 
