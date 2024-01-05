@@ -85,7 +85,7 @@ def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act):
     """
     nmo = len(mo_energy)
     nvir = nmo - nocc
-    nocc_act = nvir if nocc_act > nocc else nocc_act
+    nocc_act = nocc if nocc_act > nocc else nocc_act
     nvir_act = nvir if nvir_act > nvir else nvir_act
     mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
     Lpq_act = Lpq[:, (nocc-nocc_act):(nocc+nvir_act), (nocc-nocc_act):(nocc+nvir_act)]
