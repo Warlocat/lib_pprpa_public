@@ -277,15 +277,10 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state, pp_s
 
 
 def _analyze_pprpa_direct(
-        exci_s, xy_s, exci_t, xy_t, nocc, nvir, nocc_act=None, nvir_act=None, nelec="n-2", print_thresh=0.1, hh_state=5,
-        pp_state=5, nocc_fro=None):
+        exci_s, xy_s, exci_t, xy_t, nocc, nvir, nelec="n-2", print_thresh=0.1, hh_state=5, pp_state=5, nocc_fro=0):
     print("\nanalyze ppRPA results.")
-    nocc_act = nocc if nocc_act is None else min(nocc_act, nocc)
-    nvir_act = nvir if nvir_act is None else min(nvir_act, nvir)
-    if nocc_fro is None:
-        nocc_fro = nocc - nocc_act
-    oo_dim_s = int((nocc_act + 1) * nocc_act / 2)
-    oo_dim_t = int((nocc_act - 1) * nocc_act / 2)
+    oo_dim_s = int((nocc + 1) * nocc / 2)
+    oo_dim_t = int((nocc - 1) * nocc / 2)
     if exci_s is not None and exci_t is not None:
         print("both singlet and triplet results found.")
         if nelec == "n-2":
@@ -293,39 +288,34 @@ def _analyze_pprpa_direct(
         else:
             exci0 = max(exci_s[oo_dim_s-1], exci_t[oo_dim_t-1])
         _pprpa_print_eigenvector(
-            multi="s", nocc=nocc_act, nvir=nvir_act, nocc_fro=nocc_fro, thresh=print_thresh,
+            multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, thresh=print_thresh,
             hh_state=hh_state, pp_state=pp_state, exci0=exci0, exci=exci_s, xy=xy_s)
         _pprpa_print_eigenvector(
-            multi="t", nocc=nocc_act, nvir=nvir_act, nocc_fro=nocc_fro, thresh=print_thresh,
+            multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, thresh=print_thresh,
             hh_state=hh_state, pp_state=pp_state, exci0=exci0, exci=exci_t, xy=xy_t)
     else:
         if exci_s is not None:
             print("only singlet results found.")
             _pprpa_print_eigenvector(
-                multi="s", nocc=nocc_act, nvir=nvir_act, nocc_fro=nocc_fro, thresh=print_thresh,
-                hh_state=hh_state, pp_state=pp_state, exci0=exci_s[oo_dim_s],
-                exci=exci_s, xy=xy_s)
+                multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, thresh=print_thresh, hh_state=hh_state,
+                pp_state=pp_state, exci0=exci_s[oo_dim_s], exci=exci_s, xy=xy_s)
         else:
             print("only triplet results found.")
             _pprpa_print_eigenvector(
-                multi="t", nocc=nocc_act, nvir=nvir_act, nocc_fro=nocc_fro, thresh=print_thresh,
-                hh_state=hh_state, pp_state=pp_state, exci0=exci_t[oo_dim_t],
-                exci=exci_t, xy=xy_t)
+                multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, thresh=print_thresh, hh_state=hh_state,
+                pp_state=pp_state, exci0=exci_t[oo_dim_t], exci=exci_t, xy=xy_t)
     return
 
 
 class ppRPA_direct():
     def __init__(
-            self, nocc, mo_energy, Lpq, nocc_act=None, nvir_act=None, hh_state=5, pp_state=5, nelec="n-2",
-            print_thresh=0.1):
+            self, nocc, mo_energy, Lpq, hh_state=5, pp_state=5, nelec="n-2", print_thresh=0.1):
         # necessary input
         self.nocc = nocc  # number of occupied orbitals
         self.mo_energy = numpy.asarray(mo_energy)  # orbital energy
         self.Lpq = numpy.asarray(Lpq)  # three-center density-fitting matrix in MO space
 
         # options
-        self.nocc_act = nocc_act  # number of active occupied orbitals
-        self.nvir_act = nvir_act  # number of active virtual orbitals
         self.hh_state = hh_state  # number of hole-hole states to print
         self.pp_state = pp_state  # number of particle-particle states to print
         self.nelec = nelec  # "n-2" or "n+2" for system is an N-2 or N+2 system
@@ -354,9 +344,6 @@ class ppRPA_direct():
         return
 
     def check_parameter(self):
-        self.nocc_act = self.nocc if self.nocc_act is None else min(self.nocc_act, self.nocc)
-        self.nvir_act = self.nvir if self.nvir_act is None else min(self.nvir_act, self.nvir)
-
         assert 0.0 < self.print_thresh < 1.0
         assert self.nelec in ["n-2", "n+2"]
 
@@ -368,17 +355,16 @@ class ppRPA_direct():
     def dump_flags(self):
         print('\n******** %s ********' % self.__class__)
         if self.multi == "s":
-            oo_dim = int((self.nocc_act + 1) * self.nocc_act / 2)
-            vv_dim = int((self.nvir_act + 1) * self.nvir_act / 2)
+            oo_dim = int((self.nocc + 1) * self.nocc / 2)
+            vv_dim = int((self.nvir + 1) * self.nvir / 2)
         elif self.multi == "t":
-            oo_dim = int((self.nocc_act - 1) * self.nocc_act / 2)
-            vv_dim = int((self.nvir_act - 1) * self.nvir_act / 2)
+            oo_dim = int((self.nocc - 1) * self.nocc / 2)
+            vv_dim = int((self.nvir - 1) * self.nvir / 2)
         full_dim = oo_dim + vv_dim
         print('multiplicity = %s' % ("singlet" if self.multi == "s" else "triplet"))
         print('naux = %d' % self.naux)
         print('nmo = %d' % self.nmo)
         print('nocc = %d nvir = %d' % (self.nocc, self.nvir))
-        print('nocc_act = %d nvir_act = %d' % (self.nocc_act, self.nvir_act))
         print('occ-occ dimension = %d vir-vir dimension = %d' % (oo_dim, vv_dim))
         print('full dimension = %d' % full_dim)
         print('interested hh state = %d' % self.hh_state)
@@ -390,11 +376,11 @@ class ppRPA_direct():
 
     def check_memory(self):
         if self.multi == "s":
-            oo_dim = int((self.nocc_act + 1) * self.nocc_act / 2)
-            vv_dim = int((self.nvir_act + 1) * self.nvir_act / 2)
+            oo_dim = int((self.nocc + 1) * self.nocc / 2)
+            vv_dim = int((self.nvir + 1) * self.nvir / 2)
         elif self.multi == "t":
-            oo_dim = int((self.nocc_act - 1) * self.nocc_act / 2)
-            vv_dim = int((self.nvir_act - 1) * self.nvir_act / 2)
+            oo_dim = int((self.nocc - 1) * self.nocc / 2)
+            vv_dim = int((self.nvir - 1) * self.nvir / 2)
         full_dim = oo_dim + vv_dim
 
         # ppRPA matrix: A block and full matrix, eigenvector
@@ -411,16 +397,12 @@ class ppRPA_direct():
         self.dump_flags()
         self.check_memory()
         start_clock("ppRPA direct: %s" % multi)
-        nocc_fro = self.nocc - self.nocc_act  # number of frozen occupied orbitals
-        nvir_fro = self.nvir - self.nvir_act  # number of frozen virtual orbitals
-        mo_energy_act = self.mo_energy[nocc_fro:(self.nmo-nvir_fro)]
-        Lpq_act = self.Lpq[:, nocc_fro:(self.nmo-nvir_fro), nocc_fro:(self.nmo-nvir_fro)]
         if self.multi == "s":
             self.exci_s, self.xy_s, self.ec_s = diagonalize_pprpa_singlet(
-                nocc=self.nocc_act, mo_energy=mo_energy_act, Lpq=Lpq_act, mu=self.mu)
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, mu=self.mu)
         elif multi == "t":
             self.exci_t, self.xy_t, self.ec_t = diagonalize_pprpa_triplet(
-                nocc=self.nocc_act, mo_energy=mo_energy_act, Lpq=Lpq_act, mu=self.mu)
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, mu=self.mu)
         stop_clock("ppRPA direct: %s" % multi)
         return
 
@@ -430,8 +412,6 @@ class ppRPA_direct():
         f = h5py.File(fn, "w")
         f["nocc"] = numpy.asarray(self.nocc)
         f["nvir"] = numpy.asarray(self.nvir)
-        f["nocc_act"] = numpy.asarray(self.nocc_act)
-        f["nvir_act"] = numpy.asarray(self.nvir_act)
         if self.exci_s is not None:
             f["exci_s"] = numpy.asarray(self.exci_s)
             f["xy_s"] = numpy.asarray(self.xy_s)
@@ -453,28 +433,22 @@ class ppRPA_direct():
         f.close()
         return
 
-    def analyze(self, nocc_fro=None):
+    def analyze(self, nocc_fro=0):
         _analyze_pprpa_direct(exci_s=self.exci_s, xy_s=self.xy_s, exci_t=self.exci_t, xy_t=self.xy_t, nocc=self.nocc,
-                              nvir=self.nvir, nocc_act=self.nocc_act, nvir_act=self.nvir_act, nelec=self.nelec,
-                              print_thresh=self.print_thresh, hh_state=self.hh_state, pp_state=self.pp_state,
-                              nocc_fro=nocc_fro)
+                              nvir=self.nvir, nelec=self.nelec, print_thresh=self.print_thresh, hh_state=self.hh_state,
+                              pp_state=self.pp_state, nocc_fro=nocc_fro)
         return
 
     def get_correlation(self):
         self.check_parameter()
-        assert self.nvir_act > 0  # A block is needed for the correlation energy
         start_clock("ppRPA correlation energy")
-        nocc_fro = self.nocc - self.nocc_act  # number of frozen occupied orbitals
-        nvir_fro = self.nvir - self.nvir_act  # number of frozen virtual orbitals
-        mo_energy_act = self.mo_energy[nocc_fro:(self.nmo-nvir_fro)]
-        Lpq_act = self.Lpq[:, nocc_fro:(self.nmo-nvir_fro), nocc_fro:(self.nmo-nvir_fro)]
         if self.ec_s is None:
             self.exci_s, self.xy_s, self.ec_s = diagonalize_pprpa_singlet(
-                nocc=self.nocc_act, mo_energy=mo_energy_act, Lpq=Lpq_act, mu=self.mu)
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, mu=self.mu)
 
         if self.ec_t is None:
             self.exci_t, self.xy_t, self.ec_t = diagonalize_pprpa_triplet(
-                nocc=self.nocc_act, mo_energy=mo_energy_act, Lpq=Lpq_act, mu=self.mu)
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, mu=self.mu)
         stop_clock("ppRPA correlation energy")
         self.ec = self.ec_s + self.ec_t
         return self.ec
