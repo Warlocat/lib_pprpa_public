@@ -316,15 +316,14 @@ def _analyze_pprpa_direct(
 
 class ppRPA_direct():
     def __init__(
-            self, nocc, mo_energy, Lpq, TDA=None, nocc_act=None, nvir_act=None, hh_state=5, pp_state=5,
-            nelec="n-2", print_thresh=0.1):
+            self, nocc, mo_energy, Lpq, nocc_act=None, nvir_act=None, hh_state=5, pp_state=5, nelec="n-2",
+            print_thresh=0.1):
         # necessary input
         self.nocc = nocc  # number of occupied orbitals
         self.mo_energy = numpy.asarray(mo_energy)  # orbital energy
         self.Lpq = numpy.asarray(Lpq)  # three-center density-fitting matrix in MO space
 
         # options
-        self.TDA = TDA  # Tamm–Dancoff approximation, "pp" or "hh"
         self.nocc_act = nocc_act  # number of active occupied orbitals
         self.nvir_act = nvir_act  # number of active virtual orbitals
         self.hh_state = hh_state  # number of hole-hole states to print
@@ -355,14 +354,6 @@ class ppRPA_direct():
         return
 
     def check_parameter(self):
-        assert self.TDA in ["pp", "hh", None]
-        if self.TDA == "pp":
-            self.nocc_act = 0
-            self.nvir_act = self.nvir
-        if self.TDA == "hh":
-            self.nocc_act = self.nocc
-            self.nvir_act = 0
-
         self.nocc_act = self.nocc if self.nocc_act is None else min(self.nocc_act, self.nocc)
         self.nvir_act = self.nvir if self.nvir_act is None else min(self.nvir_act, self.nvir)
 
@@ -384,8 +375,6 @@ class ppRPA_direct():
             vv_dim = int((self.nvir_act - 1) * self.nvir_act / 2)
         full_dim = oo_dim + vv_dim
         print('multiplicity = %s' % ("singlet" if self.multi == "s" else "triplet"))
-        if self.TDA is not None:
-            print('Tamm-Dancoff approximation = %s' % self.TDA)
         print('naux = %d' % self.naux)
         print('nmo = %d' % self.nmo)
         print('nocc = %d nvir = %d' % (self.nocc, self.nvir))
