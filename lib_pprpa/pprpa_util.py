@@ -110,7 +110,7 @@ A package for particle-particle random phase approximation.
 
     If you used the active-space ppRPA, please cite
     [3] Jiachen Li, Jincheng Yu, Zehua Chen, and Weitao Yang.
-        "Linear Scaling Calculations of Excitation Energies with Active-Space Particle–Particle Random-Phase Approximation"
+        "Linear Scaling Calculations of Excitation Energies with Active-Space Particle-Particle Random-Phase Approximation"
         J. Phys. Chem. A 2023, 127, 37, 7811-7822
 
     If you used the Davidson algorithm in ppRPA, please cite
