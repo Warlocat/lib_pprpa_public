@@ -1,7 +1,7 @@
 import setuptools
 
 setuptools.setup(
-    name="lib_ppRPA",
+    name="lib_pprpa",
     version="0.1.0",
     url="https://github.com/lijiachen417/lib_pprpa",
     author="Jiachen Li",
