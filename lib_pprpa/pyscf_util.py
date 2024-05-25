@@ -6,7 +6,8 @@ from lib_pprpa.pprpa_util import start_clock, stop_clock
 
 
 # get input from PySCF
-def get_pyscf_input_mol(mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None):
+def get_pyscf_input_mol(
+        mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None):
     """Get ppRPA input from a PySCF molecular SCF calculation.
 
     Args:
@@ -65,7 +66,8 @@ def get_pyscf_input_mol(mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_fi
 
     print("\nget input for lib_pprpa from PySCF (molecule)")
     print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
-    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" % (nmo_act, nocc_act, nvir_act))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" %
+          (nmo_act, nocc_act, nvir_act))
     print("naux = %-d" % naux)
     print("dump h5py file = %-s" % dump_file)
 
@@ -102,7 +104,8 @@ def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
     nao = mo_coeff.shape[0]
     naux = kmf.with_df.get_naoaux()
     kpts = kmf.with_df.kpts
-    max_memory = max(4000, kmf.max_memory-lib.current_memory()[0]-nao**2*naux*8/1e6)
+    max_memory = max(
+        4000, kmf.max_memory-lib.current_memory()[0]-nao**2*naux*8/1e6)
 
     nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
     nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
@@ -114,9 +117,12 @@ def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
 
     kptijkl = _format_kpts(kpts)
     Lpq = []
-    for LpqR, _, _ in kmf.with_df.sr_loop(kptijkl[:2], max_memory=0.8*max_memory, compact=False):
+    for LpqR, _, _ in kmf.with_df.sr_loop(
+            kptijkl[: 2], max_memory=0.8 * max_memory, compact=False):
         tmp = None
-        tmp = _ao2mo.nr_e2(LpqR.reshape(-1, nao, nao), mo, ijslice, aosym='s1', mosym='s1', out=tmp)
+        tmp = _ao2mo.nr_e2(
+            LpqR.reshape(-1, nao, nao), mo, ijslice, aosym='s1', mosym='s1',
+            out=tmp)
         Lpq.append(tmp)
     Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
 
@@ -129,7 +135,8 @@ def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
 
     print("\nget input for lib_pprpa from PySCF (supercell)")
     print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
-    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" % (nmo_act, nocc_act, nvir_act))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" %
+          (nmo_act, nocc_act, nvir_act))
     print("naux = %-d" % naux)
     print("dump h5py file = %-s" % dump_file)
 
@@ -174,4 +181,5 @@ def get_pprpa_dm_pyscf(mf, multi, state, xy, nocc, nvir):
     """
     nocc_full = mf.mol.nelectron // 2
     mo_coeff = numpy.asarray(mf.mo_coeff)
-    return get_pprpa_dm(multi, state, xy, nocc, nvir, mo_coeff, nocc_full, full_return=False)
+    return get_pprpa_dm(
+        multi, state, xy, nocc, nvir, mo_coeff, nocc_full, full_return=False)

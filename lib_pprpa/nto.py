@@ -3,6 +3,7 @@ from functools import reduce
 import numpy
 from numpy import einsum
 
+
 def get_pprpa_nto(multi, state, xy, nocc, nvir, mo_coeff, nocc_full):
     """Get ppRPA natural transition orbital coefficient and weight.
 
@@ -65,10 +66,12 @@ def get_pprpa_nto(multi, state, xy, nocc, nvir, mo_coeff, nocc_full):
             print("weight: %-12.3f" % weight_o[i])
             print("  hole 1:")
             for j in idx_o1:
-                print("  orb=%-4d percent=%.2f%%" % (j+1, numpy.square(nto_o1[j, i])*100))
+                print("  orb=%-4d percent=%.2f%%" %
+                      (j+1, numpy.square(nto_o1[j, i])*100))
             print("  hole 2:")
             for j in idx_o2:
-                print("  orb=%-4d percent=%.2f%%" % (j+1, numpy.square(nto_o2[j, i])*100))
+                print("  orb=%-4d percent=%.2f%%" %
+                      (j+1, numpy.square(nto_o2[j, i])*100))
 
     if vv_dim > 0:
         nto_v1, wv, nto_v2T = numpy.linalg.svd(x_full)
@@ -93,22 +96,26 @@ def get_pprpa_nto(multi, state, xy, nocc, nvir, mo_coeff, nocc_full):
             print("weight: %-12.3f" % weight_v[i])
             print("  particle 1:")
             for j in idx_v1:
-                print("  orb=%-4d percent=%.2f%%" % (nocc+j+1, numpy.square(nto_v1[j, i])*100))
+                print("  orb=%-4d percent=%.2f%%" %
+                      (nocc+j+1, numpy.square(nto_v1[j, i])*100))
             print("  particle 2:")
             for j in idx_v2:
-                print("  orb=%-4d percent=%.2f%%" % (nocc+j+1, numpy.square(nto_v2[j, i])*100))
+                print("  orb=%-4d percent=%.2f%%" %
+                      (nocc+j+1, numpy.square(nto_v2[j, i])*100))
 
     print("NTO analysis finished.\n")
 
     if oo_dim > 0 and vv_dim > 0:
-        return weight_o, nto_coeff_o1, nto_coeff_o2, weight_v, nto_coeff_v1, nto_coeff_v2
+        return weight_o, nto_coeff_o1, nto_coeff_o2, weight_v, nto_coeff_v1, \
+            nto_coeff_v2
     elif oo_dim > 0:
         return weight_o, nto_coeff_o1, nto_coeff_o2
     elif vv_dim > 0:
         return weight_v, nto_coeff_v1, nto_coeff_v2
 
 
-def get_pprpa_dm(multi, state, xy, nocc, nvir, mo_coeff, nocc_full, full_return=False):
+def get_pprpa_dm(multi, state, xy, nocc, nvir, mo_coeff, nocc_full,
+                 full_return=False):
     """Get the ppRPA density matrix of the desired state.
 
     Args:

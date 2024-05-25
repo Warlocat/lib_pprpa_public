@@ -1,6 +1,7 @@
 import numpy
 import time
 
+
 def ij2index(r, c, row, col):
     """Get index of a row and column in a square matrix in a lower triangular matrix.
 
@@ -32,7 +33,8 @@ def inner_product(u, v, oo_dim):
     Returns:
         inp (double): inner product.
     """
-    inp = -numpy.sum(u[:oo_dim] * v[:oo_dim]) + numpy.sum(u[oo_dim:] * v[oo_dim:])
+    inp = -numpy.sum(u[:oo_dim] * v[:oo_dim]) \
+        + numpy.sum(u[oo_dim:] * v[oo_dim:])
     return inp
 
 
@@ -52,18 +54,24 @@ def get_chemical_potential(nocc, mo_energy):
     """
     if mo_energy.ndim == 1:
         nmo = len(mo_energy)
-        mu = 0.0 if nocc == 0 or nocc == nmo else (mo_energy[nocc-1] + mo_energy[nocc]) * 0.5
+        if nocc == 0:
+            mu = 0.0
+        else:
+            mu = (mo_energy[nocc-1] + mo_energy[nocc]) * 0.5
     elif mo_energy.ndim == 2:
         nmo = mo_energy.shape[1]
         if (nocc[0] == nocc[1] == 0) or (nocc[0] == nocc[1] == nmo):
             mu = 0.0
         else:
             assert nocc[0] >= nocc[1]
-            homo = mo_energy[0][nocc[0]-1] if nocc[1] == 0 else max(mo_energy[0][nocc[0]-1], mo_energy[1][nocc[1]-1])
+            if nocc[1] == 0:
+                homo = mo_energy[0][nocc[0]-1]
+            else:
+                homo = max(mo_energy[0][nocc[0]-1], mo_energy[1][nocc[1]-1])
             lumo = min(mo_energy[0][nocc[0]], mo_energy[1][nocc[1]])
             mu = (homo + lumo) * 0.5
     else:
-        raise ValueError("unrecognized mo_energy shape: %s" % (mo_energy.shape, ))
+        raise ValueError("unrecognized mo_energy shape: %s" % mo_energy.shape)
 
     return mu
 
@@ -88,7 +96,8 @@ def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act):
     nocc_act = nocc if nocc_act > nocc else nocc_act
     nvir_act = nvir if nvir_act > nvir else nvir_act
     mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
-    Lpq_act = Lpq[:, (nocc-nocc_act):(nocc+nvir_act), (nocc-nocc_act):(nocc+nvir_act)]
+    Lpq_act = Lpq[:, (nocc-nocc_act):(nocc+nvir_act),
+                  (nocc-nocc_act):(nocc+nvir_act)]
     return nocc_act, mo_energy_act, Lpq_act
 
 
@@ -96,7 +105,7 @@ def print_citation():
     __version__ = "0.1"
 
     __doc__ = \
-    """
+        """
 \nlib_pprpa   version %s
 A package for particle-particle random phase approximation.
 
@@ -128,6 +137,7 @@ A package for particle-particle random phase approximation.
 # time counting global variables and functions
 clock_names = []
 clocks = []
+
 
 def _s_to_hms(t):
     decimal = t - int(t)
@@ -161,4 +171,5 @@ def stop_clock(clock_name):
     del clocks[idx]
 
     print("finish %-s." % clock_name)
-    print('    CPU time for %s %s, wall time %s\n' % (clock_name, cpu_time, wall_time), flush=True)
+    print('    CPU time for %s %s, wall time %s\n' %
+          (clock_name, cpu_time, wall_time), flush=True)

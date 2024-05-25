@@ -4,45 +4,62 @@ import scipy
 
 from numpy import einsum
 
-from lib_pprpa.pprpa_util import ij2index, inner_product, start_clock, stop_clock, print_citation, get_chemical_potential
+from lib_pprpa.pprpa_util import ij2index, inner_product, start_clock, \
+    stop_clock, print_citation, get_chemical_potential
 
 
 def kernel(pprpa):
     # initialize trial vector and product matrix
-    tri_vec = numpy.zeros(shape=[pprpa.max_vec, pprpa.full_dim], dtype=numpy.double)
+    tri_vec = numpy.zeros(
+        shape=[pprpa.max_vec, pprpa.full_dim], dtype=numpy.double)
     tri_vec_sig = numpy.zeros(shape=[pprpa.max_vec], dtype=numpy.double)
-    ntri = min(pprpa.nroot * 4, pprpa.vv_dim) if pprpa.channel == "pp" else min(pprpa.nroot * 4, pprpa.oo_dim)
-    tri_vec[:ntri], tri_vec_sig[:ntri] = _pprpa_get_trial_vector(pprpa=pprpa, ntri=ntri)
+    if pprpa.channel == "pp":
+        ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
+    else:
+        ntri = min(pprpa.nroot * 4, pprpa.oo_dim)
+    tri_vec[:ntri], tri_vec_sig[:ntri] = _pprpa_get_trial_vector(
+        pprpa=pprpa, ntri=ntri)
     mv_prod = numpy.zeros_like(tri_vec)
 
     iter = 0
-    nprod = 0 # number of contracted vectors
+    nprod = 0  # number of contracted vectors
     while iter < pprpa.max_iter:
-        print("\nppRPA Davidson %d-th iteration, ntri= %d , nprod= %d ." % (iter+1, ntri, nprod))
-        mv_prod[nprod:ntri] = _pprpa_contraction(pprpa=pprpa, tri_vec=tri_vec[nprod:ntri])
+        print(
+            "\nppRPA Davidson %d-th iteration, ntri= %d , nprod= %d ." %
+            (iter + 1, ntri, nprod))
+        mv_prod[nprod:ntri] = _pprpa_contraction(
+            pprpa=pprpa, tri_vec=tri_vec[nprod:ntri])
         nprod = ntri
 
         # get ppRPA matrix and metric matrix in subspace
         m_tilde = numpy.dot(tri_vec[:ntri], mv_prod[:ntri].T)
         w_tilde = numpy.zeros_like(m_tilde)
         for i in range(ntri):
-            w_tilde[i, i] = 1 if inner_product(tri_vec[i], tri_vec[i], pprpa.oo_dim) > 0 else -1
+            if inner_product(tri_vec[i], tri_vec[i], pprpa.oo_dim) > 0:
+                w_tilde[i, i] = 1
+            else:
+                w_tilde[i, i] = -1
 
         # diagonalize subspace matrix
-        alphar, _, beta, _, v_tri, _, _ = scipy.linalg.lapack.dggev(m_tilde, w_tilde, compute_vl=0)
+        alphar, _, beta, _, v_tri, _, _ = scipy.linalg.lapack.dggev(
+            m_tilde, w_tilde, compute_vl=0)
         e_tri = alphar / beta
         v_tri = v_tri.T  # Fortran matrix to Python order
 
         if pprpa.channel == "pp":
             # TODO: this sorting algorithm can be improved
             # sort eigenvalues and eigenvectors by ascending order
-            v_tri = numpy.asarray(list(x for _, x in sorted(zip(e_tri, v_tri), reverse=False)))
+            v_tri = numpy.asarray(
+                list(x for _, x in sorted(zip(e_tri, v_tri), reverse=False)))
             e_tri = numpy.sort(e_tri)
 
             # re-order all states by signs, first hh then pp
             sig = numpy.zeros(shape=[ntri], dtype=int)
             for i in range(ntri):
-                sig[i] = 1 if numpy.sum((v_tri[i] ** 2) * tri_vec_sig[:ntri]) > 0 else -1
+                if numpy.sum((v_tri[i] ** 2) * tri_vec_sig[: ntri]) > 0:
+                    sig[i] = 1
+                else:
+                    sig[i] = -1
 
             hh_index = numpy.where(sig < 0)[0]
             pp_index = numpy.where(sig > 0)[0]
@@ -60,12 +77,14 @@ def kernel(pprpa):
         else:
             # TODO: this sorting algorithm can be improved
             # sort eigenvalues and eigenvectors by ascending order
-            v_tri = numpy.asarray(list(x for _, x in sorted(zip(e_tri, v_tri), reverse=True)))
+            v_tri = numpy.asarray(
+                list(x for _, x in sorted(zip(e_tri, v_tri), reverse=True)))
             e_tri = numpy.sort(e_tri)
             e_tri = e_tri[::-1]
 
             # TODO: re-order all states by the signs
-            # get first hh state by the sign of the eigenvector, not by the sign of the excitation energy
+            # get first hh state by the sign of the eigenvector,
+            # not by the sign of the excitation energy
             for i in range(ntri):
                 sum = numpy.sum((v_tri[i] ** 2) * tri_vec_sig[:ntri])
                 if sum < 0:
@@ -76,8 +95,9 @@ def kernel(pprpa):
             pprpa.exci = e_tri[first_state:(first_state+pprpa.nroot)]
 
         ntri_old = ntri
-        conv, ntri = _pprpa_expand_space(pprpa=pprpa, first_state=len(hh_index), tri_vec=tri_vec,
-                                         tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
+        conv, ntri = _pprpa_expand_space(
+            pprpa=pprpa, first_state=len(hh_index), tri_vec=tri_vec,
+            tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
         print("add %d new trial vectors." % (ntri - ntri_old))
 
         iter += 1
@@ -85,9 +105,11 @@ def kernel(pprpa):
             break
 
     assert conv is True, "ppRPA Davidson algorithm is not converged!"
-    print("\nppRPA Davidson converged in %d iterations, final subspace size = %d" % (iter, nprod))
+    print("\nppRPA Davidson converged in %d iterations, final subspace size = %d" % (
+        iter, nprod))
 
-    pprpa_orthonormalize_eigenvector(multi=pprpa.multi, nocc=pprpa.nocc, exci=pprpa.exci, xy=pprpa.xy)
+    pprpa_orthonormalize_eigenvector(
+        multi=pprpa.multi, nocc=pprpa.nocc, exci=pprpa.exci, xy=pprpa.xy)
 
     return
 
@@ -110,6 +132,7 @@ def _pprpa_get_trial_vector(pprpa, ntri):
     is_singlet = 1 if pprpa.multi == "s" else 0
 
     max_orb_sum = 1.0e15
+
     class pair():
         def __init__(self):
             self.p = -1
@@ -121,6 +144,7 @@ def _pprpa_get_trial_vector(pprpa, ntri):
         t = pair()
         pairs.append(t)
 
+    mo_energy = pprpa.mo_energy
     if pprpa.channel == "pp":
         # find particle-particle pairs with lowest orbital energy summation
         for r in range(ntri):
@@ -131,19 +155,24 @@ def _pprpa_get_trial_vector(pprpa, ntri):
                         if pairs[rr].p == p and pairs[rr].q == q:
                             valid = False
                             break
-                    if valid is True and (pprpa.mo_energy[p] + pprpa.mo_energy[q]) < pairs[r].eig_sum:
+                    if (valid is True
+                        and (mo_energy[p] + mo_energy[q]) < pairs[r].eig_sum):
                         pairs[r].p, pairs[r].q = p, q
-                        pairs[r].eig_sum = pprpa.mo_energy[p] + pprpa.mo_energy[q]
+                        pairs[r].eig_sum = mo_energy[p] + mo_energy[q]
 
         # sort pairs by ascending energy order
         for i in range(ntri-1):
             for j in range(i+1, ntri):
                 if pairs[i].eig_sum > pairs[j].eig_sum:
-                    p_tmp, q_tmp, eig_sum_tmp = pairs[i].p, pairs[i].q, pairs[i].eig_sum
-                    pairs[i].p, pairs[i].q, pairs[i].eig_sum = pairs[j].p, pairs[j].q, pairs[j].eig_sum
-                    pairs[j].p, pairs[j].q, pairs[j].eig_sum = p_tmp, q_tmp, eig_sum_tmp
+                    p_tmp, q_tmp, eig_sum_tmp = \
+                        pairs[i].p, pairs[i].q, pairs[i].eig_sum
+                    pairs[i].p, pairs[i].q, pairs[i].eig_sum = \
+                        pairs[j].p, pairs[j].q, pairs[j].eig_sum
+                    pairs[j].p, pairs[j].q, pairs[j].eig_sum = \
+                        p_tmp, q_tmp, eig_sum_tmp
 
-        assert pairs[ntri-1].eig_sum < max_orb_sum, "cannot find enough pairs for trial vectors"
+        assert pairs[ntri-1].eig_sum < max_orb_sum, \
+            "cannot find enough pairs for trial vectors"
 
         tri_vec = numpy.zeros(shape=[ntri, pprpa.full_dim], dtype=numpy.double)
         tri_vec_sig = numpy.zeros(shape=[ntri], dtype=numpy.double)
@@ -163,19 +192,24 @@ def _pprpa_get_trial_vector(pprpa, ntri):
                         if pairs[rr].p == q and pairs[rr].q == p:
                             valid = False
                             break
-                    if valid is True and (pprpa.mo_energy[p] + pprpa.mo_energy[q]) < pairs[r].eig_sum:
+                    if (valid is True
+                        and (mo_energy[p] + mo_energy[q]) < pairs[r].eig_sum):
                         pairs[r].p, pairs[r].q = q, p
-                        pairs[r].eig_sum = pprpa.mo_energy[p] + pprpa.mo_energy[q]
+                        pairs[r].eig_sum = mo_energy[p] + mo_energy[q]
 
         # sort pairs by descending energy order
         for i in range(ntri-1):
             for j in range(i+1, ntri):
                 if pairs[i].eig_sum < pairs[j].eig_sum:
-                    p_tmp, q_tmp, eig_sum_tmp = pairs[i].p, pairs[i].q, pairs[i].eig_sum
-                    pairs[i].p, pairs[i].q, pairs[i].eig_sum = pairs[j].p, pairs[j].q, pairs[j].eig_sum
-                    pairs[j].p, pairs[j].q, pairs[j].eig_sum = p_tmp, q_tmp, eig_sum_tmp
+                    p_tmp, q_tmp, eig_sum_tmp = \
+                        pairs[i].p, pairs[i].q, pairs[i].eig_sum
+                    pairs[i].p, pairs[i].q, pairs[i].eig_sum = \
+                        pairs[j].p, pairs[j].q, pairs[j].eig_sum
+                    pairs[j].p, pairs[j].q, pairs[j].eig_sum = \
+                        p_tmp, q_tmp, eig_sum_tmp
 
-        assert pairs[ntri-1].eig_sum < max_orb_sum, "cannot find enough pairs for trial vectors"
+        assert pairs[ntri-1].eig_sum < max_orb_sum, \
+            "cannot find enough pairs for trial vectors"
 
         tri_vec = numpy.zeros(shape=[ntri, pprpa.full_dim], dtype=numpy.double)
         tri_vec_sig = numpy.zeros(shape=[ntri], dtype=numpy.double)
@@ -219,15 +253,19 @@ def _pprpa_contraction(pprpa, tri_vec):
             z_vv[numpy.diag_indices(nvir)] *= 1.0 / numpy.sqrt(2)
 
             # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
-            Lpq_z = einsum("Lps,rs->Lpr", Lpq[:, nocc:, nocc:], z_vv, optimize=True)
+            Lpq_z = einsum(
+                "Lps,rs->Lpr", Lpq[:, nocc:, nocc:], z_vv, optimize=True)
 
             # MV_{pq} = \sum_{Lr} Lpq_{L,pr} Lpqz_{L,qr} \pm Lpq_{L,qr} Lpqz_{L,pr}
-            mv_prod_full = einsum("Lpr,Lqr->pq", Lpq[:, nocc:, nocc:], Lpq_z, optimize=True)
-            mv_prod_full += einsum("Lqr,Lpr->pq", Lpq[:, nocc:, nocc:], Lpq_z, optimize=True) * pm
+            mv_prod_full = einsum(
+                "Lpr,Lqr->pq", Lpq[:, nocc:, nocc:], Lpq_z, optimize=True)
+            mv_prod_full += einsum(
+                "Lqr,Lpr->pq", Lpq[:, nocc:, nocc:], Lpq_z, optimize=True) * pm
             mv_prod_full[numpy.diag_indices(nvir)] *= 1.0 / numpy.sqrt(2)
             mv_prod[ivec] = mv_prod_full[tri_row_v, tri_col_v]
 
-        orb_sum_vv = numpy.asarray(mo_energy[None, nocc:] + mo_energy[nocc:, None]) - 2.0 * pprpa.mu
+        orb_sum_vv = numpy.asarray(
+            mo_energy[None, nocc:] + mo_energy[nocc:, None]) - 2.0 * pprpa.mu
         orb_sum_vv = orb_sum_vv[tri_row_v, tri_col_v]
         for ivec in range(ntri):
             oz_vv = orb_sum_vv * tri_vec[ivec]
@@ -239,15 +277,19 @@ def _pprpa_contraction(pprpa, tri_vec):
             z_oo[numpy.diag_indices(nocc)] *= 1.0 / numpy.sqrt(2)
 
             # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
-            Lpq_z = einsum("Lps,rs->Lpr", Lpq[:, :nocc, :nocc], z_oo, optimize=True)
+            Lpq_z = einsum(
+                "Lps,rs->Lpr", Lpq[:, : nocc, : nocc], z_oo, optimize=True)
 
             # MV_{pq} = \sum_{Lr} Lpq_{L,pr} Lpqz_{L,qr} \pm Lpq_{L,qr} Lpqz_{L,pr}
-            mv_prod_full = einsum("Lpr,Lqr->pq", Lpq[:, :nocc, :nocc], Lpq_z, optimize=True)
-            mv_prod_full += einsum("Lqr,Lpr->pq", Lpq[:, :nocc, :nocc], Lpq_z, optimize=True) * pm
+            mv_prod_full = einsum(
+                "Lpr,Lqr->pq", Lpq[:, : nocc, : nocc], Lpq_z, optimize=True)
+            mv_prod_full += einsum(
+                "Lqr,Lpr->pq", Lpq[:, :nocc, :nocc], Lpq_z, optimize=True) * pm
             mv_prod_full[numpy.diag_indices(nocc)] *= 1.0 / numpy.sqrt(2)
             mv_prod[ivec] = mv_prod_full[tri_row_o, tri_col_o]
 
-        orb_sum_oo = numpy.asarray(mo_energy[None, :nocc] + mo_energy[:nocc, None]) - 2.0 * pprpa.mu
+        orb_sum_oo = numpy.asarray(
+            mo_energy[None, : nocc] + mo_energy[: nocc, None]) - 2.0 * pprpa.mu
         orb_sum_oo = orb_sum_oo[tri_row_o, tri_col_o]
         for ivec in range(ntri):
             oz_oo = -orb_sum_oo * tri_vec[ivec]
@@ -263,24 +305,38 @@ def _pprpa_contraction(pprpa, tri_vec):
 
             # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
             Lpq_z = numpy.zeros(shape=[naux, nmo, nmo], dtype=numpy.double)
-            Lpq_z[:, :nocc, :nocc] = einsum("Lps,rs->Lpr", Lpq[:, :nocc, :nocc], z_oo, optimize=True)
-            Lpq_z[:, nocc:, :nocc] = einsum("Lps,rs->Lpr", Lpq[:, nocc:, :nocc], z_oo, optimize=True)
-            Lpq_z[:, :nocc, nocc:] = einsum("Lps,rs->Lpr", Lpq[:, :nocc, nocc:], z_vv, optimize=True)
-            Lpq_z[:, nocc:, nocc:] = einsum("Lps,rs->Lpr", Lpq[:, nocc:, nocc:], z_vv, optimize=True)
+            Lpq_z[:, :nocc, :nocc] = einsum(
+                "Lps,rs->Lpr", Lpq[:, :nocc, :nocc], z_oo, optimize=True)
+            Lpq_z[:, nocc:, :nocc] = einsum(
+                "Lps,rs->Lpr", Lpq[:, nocc:, :nocc], z_oo, optimize=True)
+            Lpq_z[:, :nocc, nocc:] = einsum(
+                "Lps,rs->Lpr", Lpq[:, :nocc, nocc:], z_vv, optimize=True)
+            Lpq_z[:, nocc:, nocc:] = einsum(
+                "Lps,rs->Lpr", Lpq[:, nocc:, nocc:], z_vv, optimize=True)
 
             # MV_{pq} = \sum_{Lr} Lpq_{L,pr} Lpqz_{L,qr} \pm Lpq_{L,qr} Lpqz_{L,pr}
             mv_prod_full = numpy.zeros(shape=[nmo, nmo], dtype=numpy.double)
-            mv_prod_full[:nocc, :nocc] = einsum("Lpr,Lqr->pq", Lpq[:, :nocc], Lpq_z[:, :nocc], optimize=True)
-            mv_prod_full[:nocc, :nocc] += einsum("Lqr,Lpr->pq", Lpq[:, :nocc], Lpq_z[:, :nocc], optimize=True) * pm
-            mv_prod_full[nocc:, nocc:] = einsum("Lpr,Lqr->pq", Lpq[:, nocc:], Lpq_z[:, nocc:], optimize=True)
-            mv_prod_full[nocc:, nocc:] += einsum("Lqr,Lpr->pq", Lpq[:, nocc:], Lpq_z[:, nocc:], optimize=True) * pm
+            mv_prod_full[:nocc, :nocc] = einsum(
+                "Lpr,Lqr->pq", Lpq[:, :nocc], Lpq_z[:, :nocc], optimize=True)
+            mv_prod_full[:nocc, :nocc] += einsum(
+                "Lqr,Lpr->pq", Lpq[:, :nocc], Lpq_z[:, :nocc],
+                optimize=True) * pm
+            mv_prod_full[nocc:, nocc:] = einsum(
+                "Lpr,Lqr->pq", Lpq[:, nocc:], Lpq_z[:, nocc:], optimize=True)
+            mv_prod_full[nocc:, nocc:] += einsum(
+                "Lqr,Lpr->pq", Lpq[:, nocc:], Lpq_z[:, nocc:],
+                optimize=True) * pm
             mv_prod_full[numpy.diag_indices(nmo)] *= 1.0 / numpy.sqrt(2)
-            mv_prod[ivec][:pprpa.oo_dim] = mv_prod_full[:nocc, :nocc][tri_row_o, tri_col_o]
-            mv_prod[ivec][pprpa.oo_dim:] = mv_prod_full[nocc:, nocc:][tri_row_v, tri_col_v]
+            mv_prod[ivec][: pprpa.oo_dim] =\
+                mv_prod_full[: nocc, : nocc][tri_row_o, tri_col_o]
+            mv_prod[ivec][pprpa.oo_dim:] = \
+                mv_prod_full[nocc:, nocc:][tri_row_v, tri_col_v]
 
-        orb_sum_oo = numpy.asarray(mo_energy[None, :nocc] + mo_energy[:nocc, None]) - 2.0 * pprpa.mu
+        orb_sum_oo = numpy.asarray(
+            mo_energy[None, : nocc] + mo_energy[: nocc, None]) - 2.0 * pprpa.mu
         orb_sum_oo = orb_sum_oo[tri_row_o, tri_col_o]
-        orb_sum_vv = numpy.asarray(mo_energy[None, nocc:] + mo_energy[nocc:, None]) - 2.0 * pprpa.mu
+        orb_sum_vv = numpy.asarray(
+            mo_energy[None, nocc:] + mo_energy[nocc:, None]) - 2.0 * pprpa.mu
         orb_sum_vv = orb_sum_vv[tri_row_v, tri_col_v]
         for ivec in range(ntri):
             oz_oo = -orb_sum_oo * tri_vec[ivec][:pprpa.oo_dim]
@@ -291,7 +347,8 @@ def _pprpa_contraction(pprpa, tri_vec):
     return mv_prod
 
 
-def _pprpa_expand_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri):
+def _pprpa_expand_space(
+        pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri):
     """Expand trial vector space in Davidson algorithm.
 
     Args:
@@ -336,15 +393,18 @@ def _pprpa_expand_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri
     max_residue = 0
     for i in range(nroot):
         max_residue = max(max_residue, abs(numpy.max(residue[i])))
-        conv_record[i] = True if len(residue[i][abs(residue[i]) > residue_thresh]) == 0 else False
+        conv_record[i] = True if len(
+            residue[i][abs(residue[i]) > residue_thresh]) == 0 else False
     nconv = len(conv_record[conv_record is True])
     print("max residue = %.6e" % max_residue)
     if nconv == nroot:
         return True, ntri
 
-    orb_sum_oo = numpy.asarray(mo_energy[None, :nocc] + mo_energy[:nocc, None]) - 2.0 * pprpa.mu
+    orb_sum_oo = numpy.asarray(
+        mo_energy[None, : nocc] + mo_energy[: nocc, None]) - 2.0 * pprpa.mu
     orb_sum_oo = orb_sum_oo[tri_row_o, tri_col_o]
-    orb_sum_vv = numpy.asarray(mo_energy[None, nocc:] + mo_energy[nocc:, None]) - 2.0 * pprpa.mu
+    orb_sum_vv = numpy.asarray(
+        mo_energy[None, nocc:] + mo_energy[nocc:, None]) - 2.0 * pprpa.mu
     orb_sum_vv = orb_sum_vv[tri_row_v, tri_col_v]
 
     # Schmidt orthogonalization
@@ -354,11 +414,11 @@ def _pprpa_expand_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri
             continue
 
         # convert residuals
-        #if pprpa.TDA == "pp":
+        # if pprpa.TDA == "pp":
         #    residue[iroot][pprpa.oo_dim:] /= (exci[iroot] - orb_sum_vv)
-        #elif pprpa.TDA == "hh":
+        # elif pprpa.TDA == "hh":
         #    residue[iroot][:pprpa.oo_dim] /= -(exci[iroot] - orb_sum_oo)
-        #else:
+        # else:
         residue[iroot][:pprpa.oo_dim] /= -(exci[iroot] - orb_sum_oo)
         residue[iroot][pprpa.oo_dim:] /= (exci[iroot] - orb_sum_vv)
 
@@ -372,7 +432,9 @@ def _pprpa_expand_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri
 
         # add a new trial vector
         if len(residue[iroot][abs(residue[iroot]) > residue_thresh]) > 0:
-            assert ntri < max_vec, ("ppRPA Davidson expansion failed! ntri %d exceeds max_vec %d!" % (ntri, max_vec))
+            assert ntri < max_vec, (
+                "ppRPA Davidson expansion failed! ntri %d exceeds max_vec %d!" %
+                (ntri, max_vec))
             inp = inner_product(residue[iroot], residue[iroot], pprpa.oo_dim)
             tri_vec_sig[ntri] = 1 if inp > 0 else -1
             tri_vec[ntri] = residue[iroot] / numpy.sqrt(abs(inp))
@@ -438,7 +500,8 @@ def pprpa_orthonormalize_eigenvector(multi, nocc, exci, xy):
 
 
 # analysis functions
-def _pprpa_print_eigenvector(multi, nocc, nvir, thresh, channel, exci0, exci, xy):
+def _pprpa_print_eigenvector(
+        multi, nocc, nvir, thresh, channel, exci0, exci, xy):
     """Print dominant components of an eigenvector.
 
     Args:
@@ -468,26 +531,30 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, thresh, channel, exci0, exci, xy
     if channel == "pp":
         for iroot in range(nroot):
             print("#%-d %s excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
-                  (iroot + 1, multi, (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
+                  (iroot + 1, multi,
+                   (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
             if nocc > 0:
                 full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
                 full[tri_row_o, tri_col_o] = xy[iroot][:oo_dim]
                 full = numpy.power(full, 2)
                 pairs = numpy.argwhere(full > thresh)
                 for i, j in pairs:
-                    pprpa_print_a_pair(is_pp=False, p=i, q=j, percentage=full[i, j])
+                    pprpa_print_a_pair(
+                        is_pp=False, p=i, q=j, percentage=full[i, j])
 
             full = numpy.zeros(shape=[nvir, nvir], dtype=numpy.double)
             full[tri_row_v, tri_col_v] = xy[iroot][oo_dim:]
             full = numpy.power(full, 2)
             pairs = numpy.argwhere(full > thresh)
             for a, b in pairs:
-                pprpa_print_a_pair(is_pp=True, p=a+nocc, q=b+nocc, percentage=full[a, b])
+                pprpa_print_a_pair(
+                    is_pp=True, p=a+nocc, q=b+nocc, percentage=full[a, b])
             print("")
     else:
         for iroot in range(nroot):
             print("#%-d %s de-excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
-                  (iroot + 1, multi, (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
+                  (iroot + 1, multi,
+                   (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
             full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
             full[tri_row_o, tri_col_o] = xy[iroot][:oo_dim]
             full = numpy.power(full, 2)
@@ -501,7 +568,8 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, thresh, channel, exci0, exci, xy
                 full = numpy.power(full, 2)
                 pairs = numpy.argwhere(full > thresh)
                 for a, b in pairs:
-                    pprpa_print_a_pair(is_pp=True, p=a+nocc, q=b+nocc, percentage=full[a, b])
+                    pprpa_print_a_pair(
+                        is_pp=True, p=a+nocc, q=b+nocc, percentage=full[a, b])
             print("")
 
     return
@@ -517,41 +585,53 @@ def pprpa_print_a_pair(is_pp, p, q, percentage):
         percentage (double): the percentage of this pair.
     """
     if is_pp:
-      print("    particle-particle pair: %5d %5d   %5.2f%%" % (p + 1, q + 1, percentage * 100))
+      print("    particle-particle pair: %5d %5d   %5.2f%%" %
+            (p + 1, q + 1, percentage * 100))
     else:
-      print("    hole-hole pair:         %5d %5d   %5.2f%%" % (p + 1, q + 1, percentage * 100))
+      print("    hole-hole pair:         %5d %5d   %5.2f%%" %
+            (p + 1, q + 1, percentage * 100))
     return
 
 
-def _analyze_pprpa_davidson(exci_s, xy_s, exci_t, xy_t, nocc, nvir, print_thresh=0.1, channel="pp"):
+def _analyze_pprpa_davidson(
+        exci_s, xy_s, exci_t, xy_t, nocc, nvir, print_thresh=0.1, channel="pp"):
     print("\nanalyze ppRPA results.")
 
     if exci_s is not None and exci_t is not None:
         print("both singlet and triplet results found.")
-        exci0 = min(exci_s[0], exci_t[0]) if channel == "pp" else max(exci_s[0], exci_t[0])
-        _pprpa_print_eigenvector(multi="s", nocc=nocc, nvir=nvir, thresh=print_thresh, channel=channel,
-                                 exci0=exci0, exci=exci_s, xy=xy_s)
-        _pprpa_print_eigenvector(multi="t", nocc=nocc, nvir=nvir, thresh=print_thresh, channel=channel,
-                                 exci0=exci0, exci=exci_t, xy=xy_t)
+        if channel == "pp":
+            exci0 = min(exci_s[0], exci_t[0])
+        else:
+            exci0 = max(exci_s[0], exci_t[0])
+        _pprpa_print_eigenvector(
+            multi="s", nocc=nocc, nvir=nvir, thresh=print_thresh,
+            channel=channel, exci0=exci0, exci=exci_s, xy=xy_s)
+        _pprpa_print_eigenvector(
+            multi="t", nocc=nocc, nvir=nvir, thresh=print_thresh,
+            channel=channel, exci0=exci0, exci=exci_t, xy=xy_t)
     else:
         if exci_s is not None:
             print("only singlet results found.")
-            _pprpa_print_eigenvector(multi="s", nocc=nocc, nvir=nvir, thresh=print_thresh, channel=channel,
-                                     exci0=exci_s[0], exci=exci_s, xy=xy_s)
+            _pprpa_print_eigenvector(
+                multi="s", nocc=nocc, nvir=nvir, thresh=print_thresh,
+                channel=channel, exci0=exci_s[0], exci=exci_s, xy=xy_s)
         else:
             print("only triplet results found.")
-            _pprpa_print_eigenvector(multi="t", nocc=nocc, nvir=nvir, thresh=print_thresh, channel=channel,
-                                     exci0=exci_t[0], exci=exci_t, xy=xy_t)
+            _pprpa_print_eigenvector(
+                multi="t", nocc=nocc, nvir=nvir, thresh=print_thresh,
+                channel=channel, exci0=exci_t[0], exci=exci_t, xy=xy_t)
     return
 
 
 class ppRPA_Davidson():
-    def __init__(self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=200, max_iter=100, residue_thresh=1.0e-7,
-                 print_thresh=0.1):
+    def __init__(
+            self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=200,
+            max_iter=100, residue_thresh=1.0e-7, print_thresh=0.1):
         # necessary input
         self.nocc = nocc  # number of occupied orbitals
         self.mo_energy = numpy.asarray(mo_energy)  # orbital energy
-        self.Lpq = numpy.asarray(Lpq)  # three-center density-fitting matrix in MO space
+        # three-center density-fitting matrix in MO space
+        self.Lpq = numpy.asarray(Lpq)
 
         # options
         self.channel = channel  # channel of desired states, particle-particle or hole-hole
@@ -559,7 +639,7 @@ class ppRPA_Davidson():
         self.max_vec = max_vec  # max size of trial vectors
         self.max_iter = max_iter  # max iteration
         self.residue_thresh = residue_thresh  # residue threshold
-        self.print_thresh = print_thresh  #  threshold to print component
+        self.print_thresh = print_thresh  # threshold to print component
 
         # internal flags
         self.multi = None  # multiplicity
@@ -604,18 +684,23 @@ class ppRPA_Davidson():
         assert 0.0 < self.print_thresh < 1.0
 
         if self.mu is None:
-            self.mu = get_chemical_potential(nocc=self.nocc, mo_energy=self.mo_energy)
+            self.mu = get_chemical_potential(
+                nocc=self.nocc, mo_energy=self.mo_energy)
 
         return
 
     def dump_flags(self):
         print('\n******** %s ********' % self.__class__)
-        print('multiplicity = %s' % ("singlet" if self.multi == "s" else "triplet"))
+        print(
+            'multiplicity = %s' %
+            ("singlet" if self.multi == "s" else "triplet"))
         print('state channel = %s' % self.channel)
         print('naux = %d' % self.naux)
         print('nmo = %d' % self.nmo)
         print('nocc = %d nvir = %d' % (self.nocc, self.nvir))
-        print('occ-occ dimension = %d vir-vir dimension = %d' % (self.oo_dim, self.vv_dim))
+        print(
+            'occ-occ dimension = %d vir-vir dimension = %d' %
+            (self.oo_dim, self.vv_dim))
         print('full dimension = %d' % self.full_dim)
         print('number of roots = %d' % self.nroot)
         print('max subspace size = %d' % self.max_vec)
@@ -627,7 +712,9 @@ class ppRPA_Davidson():
 
     def check_memory(self):
         # intermediate in contraction; mv_prod, tri_vec, xy
-        mem = (self.naux * self.nmo * self.nmo + 3 * self.max_vec * self.full_dim) * 8 / 1.0e6
+        mem = (
+            self.naux * self.nmo * self.nmo + 3 * self.max_vec * self.full_dim)\
+                * 8 / 1.0e6
         if mem < 1000:
             print("ppRPA needs at least %d MB memory." % mem)
         else:
@@ -679,6 +766,8 @@ class ppRPA_Davidson():
         return
 
     def analyze(self):
-        _analyze_pprpa_davidson(exci_s=self.exci_s, xy_s=self.xy_s, exci_t=self.exci_t, xy_t=self.xy_t, nocc=self.nocc,
-                                nvir=self.nvir, print_thresh=self.print_thresh, channel=self.channel)
+        _analyze_pprpa_davidson(
+            exci_s=self.exci_s, xy_s=self.xy_s, exci_t=self.exci_t,
+            xy_t=self.xy_t, nocc=self.nocc, nvir=self.nvir,
+            print_thresh=self.print_thresh, channel=self.channel)
         return
