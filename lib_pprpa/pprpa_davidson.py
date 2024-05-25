@@ -76,8 +76,8 @@ def kernel(pprpa):
             pprpa.exci = e_tri[first_state:(first_state+pprpa.nroot)]
 
         ntri_old = ntri
-        conv, ntri = _pprpa_expand_space(pprpa=pprpa, first_state=first_state, tri_vec=tri_vec, tri_vec_sig=tri_vec_sig,
-                                         mv_prod=mv_prod, v_tri=v_tri)
+        conv, ntri = _pprpa_expand_space(pprpa=pprpa, first_state=len(hh_index), tri_vec=tri_vec,
+                                         tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
         print("add %d new trial vectors." % (ntri - ntri_old))
 
         iter += 1
