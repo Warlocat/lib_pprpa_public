@@ -17,7 +17,7 @@ def diagonalize_pprpa_singlet(nocc, mo_energy, Lpq, mu=None):
     Args:
         nocc (int): number of occupied orbitals.
         mo_energy (double array): orbital energy.
-        Lpq (double ndarray): three-center density-fitting matrix 
+        Lpq (double ndarray): three-center density-fitting matrix
                               in MO space.
         mu (double, optional): chemical potential. Defaults to None.
 
@@ -39,9 +39,9 @@ def diagonalize_pprpa_singlet(nocc, mo_energy, Lpq, mu=None):
 
     # A matrix: particle-particle block
     # two-electron integral part, <ab|cd>+<ab|dc>
-    A = einsum("Pac,Pbd->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:], 
+    A = einsum("Pac,Pbd->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:],
                optimize=True)
-    A += einsum("Pad,Pbc->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:], 
+    A += einsum("Pad,Pbc->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:],
                 optimize=True)
     # scale the diagonal elements
     A[numpy.diag_indices(nvir)] *= 1.0 / numpy.sqrt(2)  # a=b
@@ -62,9 +62,9 @@ def diagonalize_pprpa_singlet(nocc, mo_energy, Lpq, mu=None):
 
     # B matrix: particle-hole block
     # two-electron integral part, <ab|ij>+<ab|ji>
-    B = einsum("Pai,Pbj->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc], 
+    B = einsum("Pai,Pbj->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc],
                optimize=True)
-    B += einsum("Paj,Pbi->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc], 
+    B += einsum("Paj,Pbi->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc],
                 optimize=True)
     # scale the diagonal elements
     B[numpy.diag_indices(nvir)] *= 1.0 / numpy.sqrt(2)  # a=b
@@ -77,9 +77,9 @@ def diagonalize_pprpa_singlet(nocc, mo_energy, Lpq, mu=None):
 
     # C matrix: hole-hole block
     # two-electron integral part, <ij|kl>+<ij|lk>
-    C = einsum("Pik,Pjl->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc], 
+    C = einsum("Pik,Pjl->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc],
                optimize=True)
-    C += einsum("Pil,Pjk->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc], 
+    C += einsum("Pil,Pjk->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc],
                 optimize=True)
     # scale the diagonal elements
     C[numpy.diag_indices(nocc)] *= 1.0 / numpy.sqrt(2)  # i=j
@@ -111,8 +111,11 @@ def diagonalize_pprpa_singlet(nocc, mo_energy, Lpq, mu=None):
     exci, xy = scipy.linalg.eig(M)
     exci = exci.real
     xy = xy.T  # Fortran to Python order
-    xy = numpy.asarray(list(x for _, x in sorted(zip(exci, xy), reverse=False)))
-    exci = numpy.sort(exci)
+
+    # sort eigenvalue and eigenvectors by ascending order
+    idx = exci.argsort()
+    exci = exci[idx]
+    xy = xy[idx, :]
 
     pprpa_orthonormalize_eigenvector(multi="s", nocc=nocc, exci=exci, xy=xy)
 
@@ -131,7 +134,7 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
     Args:
         nocc (int): number of occupied orbitals.
         mo_energy (double array): orbital energy.
-        Lpq (double ndarray): three-center density-fitting matrix 
+        Lpq (double ndarray): three-center density-fitting matrix
                               in MO space.
         mu (double, optional): chemical potential. Defaults to None.
 
@@ -153,9 +156,9 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
 
     # A matrix: particle-particle block
     # two-electron integral part, <ab|cd>-<ab|dc>
-    A = einsum("Pac,Pbd->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:], 
+    A = einsum("Pac,Pbd->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:],
                optimize=True)
-    A -= einsum("Pad,Pbc->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:], 
+    A -= einsum("Pad,Pbc->abcd", Lpq[:, nocc:, nocc:], Lpq[:, nocc:, nocc:],
                 optimize=True)
     # orbital energy part
     A = A.reshape(nvir*nvir, nvir*nvir)
@@ -171,9 +174,9 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
 
     # B matrix: particle-hole block
     # two-electron integral part, <ab|ij>-<ab|ji>
-    B = einsum("Pai,Pbj->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc], 
+    B = einsum("Pai,Pbj->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc],
                optimize=True)
-    B -= einsum("Paj,Pbi->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc], 
+    B -= einsum("Paj,Pbi->abij", Lpq[:, nocc:, :nocc], Lpq[:, nocc:, :nocc],
                 optimize=True)
     # take only low-triangular part
     B = B[tri_row_v, tri_col_v, ...]
@@ -181,9 +184,9 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
 
     # C matrix: hole-hole block
     # two-electron integral part, <ij|kl>-<ij|lk>
-    C = einsum("Pik,Pjl->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc], 
+    C = einsum("Pik,Pjl->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc],
                optimize=True)
-    C -= einsum("Pil,Pjk->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc], 
+    C -= einsum("Pil,Pjk->ijkl", Lpq[:, :nocc, :nocc], Lpq[:, :nocc, :nocc],
                 optimize=True)
     # orbital energy part
     C = C.reshape(nocc*nocc, nocc*nocc)
@@ -210,8 +213,11 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
     exci, xy = scipy.linalg.eig(M)
     exci = exci.real
     xy = xy.T  # Fortran to Python order
-    xy = numpy.asarray(list(x for _, x in sorted(zip(exci, xy), reverse=False)))
-    exci = numpy.sort(exci)
+
+    # sort eigenvalue and eigenvectors by ascending order
+    idx = exci.argsort()
+    exci = exci[idx]
+    xy = xy[idx, :]
 
     pprpa_orthonormalize_eigenvector(multi="t", nocc=nocc, exci=exci, xy=xy)
 
@@ -222,7 +228,7 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
 
 
 # analysis functions
-def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state, 
+def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
                              pp_state, exci0, exci, xy):
     """Print dominant components of an eigenvector.
 
@@ -256,14 +262,14 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
 
     for istate in range(min(hh_state, oo_dim)):
         print("#%-d %s de-excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
-              (istate + 1, multi, (exci[oo_dim-istate-1] - exci0) * au2ev, 
+              (istate + 1, multi, (exci[oo_dim-istate-1] - exci0) * au2ev,
                exci[oo_dim-istate-1] * au2ev))
         full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
         full[tri_row_o, tri_col_o] = xy[oo_dim-istate-1][:oo_dim]
         full = numpy.power(full, 2)
         pairs = numpy.argwhere(full > thresh)
         for i, j in pairs:
-            pprpa_print_a_pair(is_pp=False, p=i+nocc_fro, q=j+nocc_fro, 
+            pprpa_print_a_pair(is_pp=False, p=i+nocc_fro, q=j+nocc_fro,
                                percentage=full[i, j])
 
         full = numpy.zeros(shape=[nvir, nvir], dtype=numpy.double)
@@ -271,21 +277,21 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
         full = numpy.power(full, 2)
         pairs = numpy.argwhere(full > thresh)
         for a, b in pairs:
-            pprpa_print_a_pair(is_pp=True, p=a+nocc_fro+nocc, q=b+nocc_fro+nocc, 
+            pprpa_print_a_pair(is_pp=True, p=a+nocc_fro+nocc, q=b+nocc_fro+nocc,
                                percentage=full[a, b])
 
         print("")
 
     for istate in range(min(pp_state, vv_dim)):
         print("#%-d %s excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
-              (istate + 1, multi, (exci[oo_dim+istate] - exci0) * au2ev, 
+              (istate + 1, multi, (exci[oo_dim+istate] - exci0) * au2ev,
                exci[oo_dim+istate] * au2ev))
         full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
         full[tri_row_o, tri_col_o] = xy[oo_dim+istate][:oo_dim]
         full = numpy.power(full, 2)
         pairs = numpy.argwhere(full > thresh)
         for i, j in pairs:
-            pprpa_print_a_pair(is_pp=False, p=i+nocc_fro, q=j+nocc_fro, 
+            pprpa_print_a_pair(is_pp=False, p=i+nocc_fro, q=j+nocc_fro,
                                percentage=full[i, j])
 
         full = numpy.zeros(shape=[nvir, nvir], dtype=numpy.double)
@@ -293,7 +299,7 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
         full = numpy.power(full, 2)
         pairs = numpy.argwhere(full > thresh)
         for a, b in pairs:
-            pprpa_print_a_pair(is_pp=True, p=a+nocc_fro+nocc, q=b+nocc_fro+nocc, 
+            pprpa_print_a_pair(is_pp=True, p=a+nocc_fro+nocc, q=b+nocc_fro+nocc,
                                percentage=full[a, b])
 
         print("")
@@ -302,7 +308,7 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
 
 
 def _analyze_pprpa_direct(
-        exci_s, xy_s, exci_t, xy_t, nocc, nvir, nelec="n-2", print_thresh=0.1, 
+        exci_s, xy_s, exci_t, xy_t, nocc, nvir, nelec="n-2", print_thresh=0.1,
         hh_state=5, pp_state=5, nocc_fro=0):
     print("\nanalyze ppRPA results.")
     oo_dim_s = int((nocc + 1) * nocc / 2)
@@ -314,26 +320,26 @@ def _analyze_pprpa_direct(
         else:
             exci0 = max(exci_s[oo_dim_s-1], exci_t[oo_dim_t-1])
         _pprpa_print_eigenvector(
-            multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, 
+            multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
             thresh=print_thresh,
-            hh_state=hh_state, pp_state=pp_state, exci0=exci0, 
+            hh_state=hh_state, pp_state=pp_state, exci0=exci0,
             exci=exci_s, xy=xy_s)
         _pprpa_print_eigenvector(
-            multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, 
+            multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
             thresh=print_thresh,
-            hh_state=hh_state, pp_state=pp_state, exci0=exci0, 
+            hh_state=hh_state, pp_state=pp_state, exci0=exci0,
             exci=exci_t, xy=xy_t)
     else:
         if exci_s is not None:
             print("only singlet results found.")
             _pprpa_print_eigenvector(
-                multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, 
+                multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
                 thresh=print_thresh, hh_state=hh_state,
                 pp_state=pp_state, exci0=exci_s[oo_dim_s], exci=exci_s, xy=xy_s)
         else:
             print("only triplet results found.")
             _pprpa_print_eigenvector(
-                multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro, 
+                multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
                 thresh=print_thresh, hh_state=hh_state,
                 pp_state=pp_state, exci0=exci_t[oo_dim_t], exci=exci_t, xy=xy_t)
     return
@@ -341,7 +347,7 @@ def _analyze_pprpa_direct(
 
 class ppRPA_direct():
     def __init__(
-            self, nocc, mo_energy, Lpq, hh_state=5, pp_state=5, nelec="n-2", 
+            self, nocc, mo_energy, Lpq, hh_state=5, pp_state=5, nelec="n-2",
             print_thresh=0.1):
         # necessary input
         self.nocc = nocc  # number of occupied orbitals
@@ -381,7 +387,7 @@ class ppRPA_direct():
         assert self.nelec in ["n-2", "n+2"]
 
         if self.mu is None:
-            self.mu = get_chemical_potential(nocc=self.nocc, 
+            self.mu = get_chemical_potential(nocc=self.nocc,
                                              mo_energy=self.mo_energy)
 
         return
@@ -395,12 +401,12 @@ class ppRPA_direct():
             oo_dim = int((self.nocc - 1) * self.nocc / 2)
             vv_dim = int((self.nvir - 1) * self.nvir / 2)
         full_dim = oo_dim + vv_dim
-        print('multiplicity = %s' % 
+        print('multiplicity = %s' %
               ("singlet" if self.multi == "s" else "triplet"))
         print('naux = %d' % self.naux)
         print('nmo = %d' % self.nmo)
         print('nocc = %d nvir = %d' % (self.nocc, self.nvir))
-        print('occ-occ dimension = %d vir-vir dimension = %d' % 
+        print('occ-occ dimension = %d vir-vir dimension = %d' %
               (oo_dim, vv_dim))
         print('full dimension = %d' % full_dim)
         print('interested hh state = %d' % self.hh_state)
@@ -435,11 +441,11 @@ class ppRPA_direct():
         start_clock("ppRPA direct: %s" % multi)
         if self.multi == "s":
             self.exci_s, self.xy_s, self.ec_s = diagonalize_pprpa_singlet(
-                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, 
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq,
                 mu=self.mu)
         elif multi == "t":
             self.exci_t, self.xy_t, self.ec_t = diagonalize_pprpa_triplet(
-                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, 
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq,
                 mu=self.mu)
         stop_clock("ppRPA direct: %s" % multi)
         return
@@ -472,10 +478,10 @@ class ppRPA_direct():
         return
 
     def analyze(self, nocc_fro=0):
-        _analyze_pprpa_direct(exci_s=self.exci_s, xy_s=self.xy_s, 
-                              exci_t=self.exci_t, xy_t=self.xy_t, 
-                              nocc=self.nocc, nvir=self.nvir, nelec=self.nelec, 
-                              print_thresh=self.print_thresh, 
+        _analyze_pprpa_direct(exci_s=self.exci_s, xy_s=self.xy_s,
+                              exci_t=self.exci_t, xy_t=self.xy_t,
+                              nocc=self.nocc, nvir=self.nvir, nelec=self.nelec,
+                              print_thresh=self.print_thresh,
                               hh_state=self.hh_state,
                               pp_state=self.pp_state, nocc_fro=nocc_fro)
         return
@@ -485,12 +491,12 @@ class ppRPA_direct():
         start_clock("ppRPA correlation energy")
         if self.ec_s is None:
             self.exci_s, self.xy_s, self.ec_s = diagonalize_pprpa_singlet(
-                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, 
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq,
                 mu=self.mu)
 
         if self.ec_t is None:
             self.exci_t, self.xy_t, self.ec_t = diagonalize_pprpa_triplet(
-                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq, 
+                nocc=self.nocc, mo_energy=self.mo_energy, Lpq=self.Lpq,
                 mu=self.mu)
         stop_clock("ppRPA correlation energy")
         self.ec = self.ec_s + self.ec_t

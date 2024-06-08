@@ -47,11 +47,10 @@ def kernel(pprpa):
         v_tri = v_tri.T  # Fortran matrix to Python order
 
         if pprpa.channel == "pp":
-            # TODO: this sorting algorithm can be improved
             # sort eigenvalues and eigenvectors by ascending order
-            v_tri = numpy.asarray(
-                list(x for _, x in sorted(zip(e_tri, v_tri), reverse=False)))
-            e_tri = numpy.sort(e_tri)
+            idx = e_tri.argsort()
+            e_tri = e_tri[idx]
+            v_tri = v_tri[idx, :]
 
             # re-order all states by signs, first hh then pp
             sig = numpy.zeros(shape=[ntri], dtype=int)
@@ -73,30 +72,40 @@ def kernel(pprpa):
             v_tri[len(hh_index):] = v_tri_pp
 
             # get only two-electron addition energy
-            pprpa.exci = e_tri[len(hh_index):(len(hh_index)+pprpa.nroot)]
+            first_state=len(hh_index)
+            pprpa.exci = e_tri[first_state:first_state+pprpa.nroot]
         else:
-            # TODO: this sorting algorithm can be improved
-            # sort eigenvalues and eigenvectors by ascending order
-            v_tri = numpy.asarray(
-                list(x for _, x in sorted(zip(e_tri, v_tri), reverse=True)))
-            e_tri = numpy.sort(e_tri)
-            e_tri = e_tri[::-1]
+            # sort eigenvalues and eigenvectors by descending order
+            idx = e_tri.argsort()[::-1]
+            e_tri = e_tri[idx]
+            v_tri = v_tri[idx, :]
 
-            # TODO: re-order all states by the signs
-            # get first hh state by the sign of the eigenvector,
-            # not by the sign of the excitation energy
+            # re-order all states by signs, first pp then hh
+            sig = numpy.zeros(shape=[ntri], dtype=int)
             for i in range(ntri):
-                sum = numpy.sum((v_tri[i] ** 2) * tri_vec_sig[:ntri])
-                if sum < 0:
-                    first_state = i
-                    break
+                if numpy.sum((v_tri[i] ** 2) * tri_vec_sig[:ntri]) > 0:
+                    sig[i] = 1
+                else:
+                    sig[i] = -1
 
-            # get only two-electron addition energy
-            pprpa.exci = e_tri[first_state:(first_state+pprpa.nroot)]
+            hh_index = numpy.where(sig < 0)[0]
+            pp_index = numpy.where(sig > 0)[0]
+            e_tri_hh = e_tri[hh_index]
+            e_tri_pp = e_tri[pp_index]
+            e_tri[:len(pp_index)] = e_tri_pp
+            e_tri[len(pp_index):] = e_tri_hh
+            v_tri_hh = v_tri[hh_index]
+            v_tri_pp = v_tri[pp_index]
+            v_tri[:len(pp_index)] = v_tri_pp
+            v_tri[len(pp_index):] = v_tri_hh
+
+            # get only two-electron removal energy
+            first_state=len(pp_index)
+            pprpa.exci = e_tri[first_state:first_state+pprpa.nroot]
 
         ntri_old = ntri
         conv, ntri = _pprpa_expand_space(
-            pprpa=pprpa, first_state=len(hh_index), tri_vec=tri_vec,
+            pprpa=pprpa, first_state=first_state, tri_vec=tri_vec,
             tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
         print("add %d new trial vectors." % (ntri - ntri_old))
 
