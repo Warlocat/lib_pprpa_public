@@ -44,7 +44,10 @@ def get_chemical_potential(nocc, mo_energy):
 
     Args:
         nocc (int/int array): number of occupied orbitals.
-        mo_energy (double array/double ndarray): orbital energy.
+        mo_energy (double array/double ndarray/list of double array): 
+            orbital energy. double array for restricted calculation,
+            double ndarray/list of double array for unrestricted
+            calculation.
 
     Raises:
         ValueError: unrecognized mo_energy dimension.
@@ -52,15 +55,21 @@ def get_chemical_potential(nocc, mo_energy):
     Returns:
         mu (double): chemical potential.
     """
-    if mo_energy.ndim == 1:
+    nspin = None
+    if isinstance(mo_energy, list):
+        nspin = len(mo_energy)
+    elif isinstance(mo_energy, numpy.array):
+        nspin = mo_energy.ndim
+
+    if nspin == 1:
         nmo = len(mo_energy)
         if nocc == 0:
             mu = 0.0
         else:
             mu = (mo_energy[nocc-1] + mo_energy[nocc]) * 0.5
-    elif mo_energy.ndim == 2:
-        nmo = mo_energy.shape[1]
-        if (nocc[0] == nocc[1] == 0) or (nocc[0] == nocc[1] == nmo):
+    elif nspin == 2:
+        nmo = (len(mo_energy[0]), len(mo_energy[1]))
+        if (nocc[0] == nocc[1] == 0) or (nocc[0] == nmo[0] and nocc[1]==nmo[1]):
             mu = 0.0
         else:
             assert nocc[0] >= nocc[1]
@@ -71,7 +80,7 @@ def get_chemical_potential(nocc, mo_energy):
             lumo = min(mo_energy[0][nocc[0]], mo_energy[1][nocc[1]])
             mu = (homo + lumo) * 0.5
     else:
-        raise ValueError("unrecognized mo_energy shape: %s" % mo_energy.shape)
+        raise ValueError("unrecognized mo_energy.")
 
     return mu
 
