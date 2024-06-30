@@ -502,9 +502,6 @@ def pprpa_orthonormalize_eigenvector(multi, nocc, exci, xy):
     xy[:len(hh_index)] = xy_hh
     xy[len(hh_index):] = xy_pp
 
-    # change |X -Y> to |X Y>
-    xy[:][:oo_dim] *= -1
-
     return
 
 
