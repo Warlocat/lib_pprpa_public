@@ -104,7 +104,7 @@ def diagonalize_pprpa_singlet(nocc, mo_energy, Lpq, mu=None):
     M_lower = numpy.concatenate((B, A), axis=1)
     M = numpy.concatenate((M_upper, M_lower), axis=0)
     del A, B, C
-    # M to MW, W is the metric matrix [[-I,0],[0,I]]
+    # M to WM, W is the metric matrix [[-I,0],[0,I]]
     M[:oo_dim][:] *= -1.0
 
     # diagonalize ppRPA matrix
@@ -206,7 +206,7 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
     M_lower = numpy.concatenate((B, A), axis=1)
     M = numpy.concatenate((M_upper, M_lower), axis=0)
     del A, B, C
-    # M to MW, W is the metric matrix [[-I,0],[0,I]]
+    # M to WM, W is the metric matrix [[-I,0],[0,I]]
     M[:oo_dim][:] *= -1.0
 
     # diagonalize ppRPA matrix

@@ -76,6 +76,113 @@ def get_pyscf_input_mol(
     return nocc_act, mo_energy_act, Lpq
 
 
+def get_pyscf_input_mol_u(
+        mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None):
+    """Get ppRPA input from a PySCF unrestricted calculation.
+
+    Args:
+        mf (pyscf.scf.UHF/pyscf.dft.UKS): molecular mean-field object.
+
+    Kwargs:
+        auxbasis (str): name of the auxiliary basis set. Default to None.
+        nocc_act (tuple of int): number of active occupied orbitals, 
+            (Nalpha, Nbeta). Default to None.
+        nvir_act (tuple of int): number of active virtual orbitals,
+            (Nalpha, Nbeta). Default to None.
+        dump_file (str): name of the file to dump matrices for lib_pprpa.
+            Default to None.
+
+    Returns:
+        nocc_act (tuple of int): number of occupied orbitals
+            in the active space.
+        mo_energy_act (list of double ndarray): orbital energies in the active space.
+        Lpq (list of double ndarray): three-center density fitting matrix
+            in the active MO space.
+    """
+    from pyscf import df
+    from pyscf.ao2mo import _ao2mo
+
+    start_clock("getting input for unrestricted ppRPA from PySCF")
+
+    nmo = (len(mf.mo_energy[0]), len(mf.mo_energy[1]))
+    nocc = mf.nelec
+    nvir = (nmo[0] - nocc[0], nmo[1] - nocc[1])
+    mo_energy = numpy.asarray(mf.mo_energy)
+    
+    if nocc_act is None:
+        nocc_act = nocc
+    else:
+        nocc_act = (min(nocc[0], nocc_act[0]), min(nocc[1], nocc_act[1]))
+    if nvir_act is None:
+        nvir_act = nvir
+    else:
+        nvir_act = (min(nvir[0], nvir_act[0]), min(nvir[1], nvir_act[1]))
+    nmo_act = (nocc_act[0] + nvir_act[0], nocc_act[1] + nvir_act[1])
+    mo_energy_act =[
+        mo_energy[0, (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])],
+        mo_energy[1, (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])]]
+
+    if getattr(mf, 'with_df', None):
+        pass
+    else:
+        mf.with_df = df.DF(mf.mol)
+        if auxbasis is not None:
+            mf.with_df.auxbasis = auxbasis
+        else:
+            try:
+                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
+            except:
+                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=False)
+        mf._keys.update(['with_df'])
+
+    naux = mf.with_df.get_naoaux()
+    mo = mf.mo_coeff
+    ijslice = [
+        (
+            nocc[0]-nocc_act[0], nocc[0]+nvir_act[0], 
+            nocc[0]-nocc_act[0], nocc[0]+nvir_act[0]),
+        (
+            nocc[1]-nocc_act[1], nocc[1]+nvir_act[1], 
+            nocc[1]-nocc_act[1], nocc[1]+nvir_act[1]),
+    ]
+    Lpq_a = None
+    Lpq_b = None
+    Lpq_a = _ao2mo.nr_e2(mf.with_df._cderi, mo[0], ijslice[0], 
+                         aosym='s2', out=Lpq_a)
+    Lpq_a = Lpq_a.reshape(naux, nmo_act[0], nmo_act[0])
+    Lpq_b = _ao2mo.nr_e2(mf.with_df._cderi, mo[1], ijslice[1], 
+                         aosym='s2', out=Lpq_b)
+    Lpq_b = Lpq_b.reshape(naux, nmo_act[1], nmo_act[1])
+    Lpq = [Lpq_a, Lpq_b]
+
+    if dump_file is not None:
+        f = h5py.File(name="%s.h5" % dump_file, mode="w")
+        f["nocc"] = numpy.asarray(nocc_act)
+        f["mo_energy"] = numpy.asarray(mo_energy_act)
+        f["Lpq"] = numpy.asarray(Lpq)
+        f.close()
+
+    print("\nget input for lib_pprpa from PySCF (molecule)")
+    print("nmo = %-d (%-d alpha, %-d beta)" % 
+          (nmo[0] + nmo[1], nmo[0], nmo[1]), end=', ')
+    print("nocc = %-d (%-d alpha, %-d beta)" % 
+          (nocc[0] + nocc[1], nocc[0], nocc[1]), end=', ')
+    print("nvir = %-d (%-d alpha, %-d beta)" % 
+          (nvir[0] + nvir[1], nvir[0], nvir[1]))
+    print("nmo_act = %-d (%-d alpha, %-d beta)" % 
+          (nmo_act[0] + nmo_act[1], nmo_act[0], nmo_act[1]), end=', ')
+    print("nocc_act = %-d (%-d alpha, %-d beta)" % 
+          (nocc_act[0] + nocc_act[1], nocc_act[0], nocc_act[1]), end=', ')
+    print("nvir_act = %-d (%-d alpha, %-d beta)" % 
+          (nvir_act[0] + nvir_act[1], nvir_act[0], nvir_act[1]))
+    print("naux = %-d" % naux)
+    print("dump h5py file = %-s" % dump_file)
+
+    stop_clock("getting input for unrestricted ppRPA from PySCF")
+
+    return nocc_act, mo_energy_act, Lpq
+
+
 def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
     """Get ppRPA input from a PySCF supercell SCF calculation.
 
