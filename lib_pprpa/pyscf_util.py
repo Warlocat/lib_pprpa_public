@@ -8,6 +8,30 @@ from lib_pprpa.pprpa_util import start_clock, stop_clock
 # get input from PySCF
 def get_pyscf_input_mol(
         mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None):
+    import pyscf
+
+    if isinstance(mf, pyscf.scf.uhf.UHF) or isinstance(mf, pyscf.dft.uks.UKS):
+        return get_pyscf_input_mol_u(
+            mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
+            dump_file=dump_file)
+
+    if isinstance(mf, pyscf.scf.rohf.ROHF) or\
+            isinstance(mf, pyscf.dft.roks.ROKS):
+        mf = mf.copy()
+        mf.mo_coeff = [mf.mo_coeff, mf.mo_coeff]
+        mf.mo_energy = [mf.mo_energy, mf.mo_energy]
+        return get_pyscf_input_mol_u(
+            mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
+            dump_file=dump_file)
+
+    if isinstance(mf, pyscf.scf.rhf.RHF) or isinstance(mf, pyscf.dft.rks.RKS):
+        return get_pyscf_input_mol_r(
+            mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
+            dump_file=dump_file)
+
+
+def get_pyscf_input_mol_r(
+        mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None):
     """Get ppRPA input from a PySCF molecular SCF calculation.
 
     Args:
@@ -108,7 +132,7 @@ def get_pyscf_input_mol_u(
     nocc = mf.nelec
     nvir = (nmo[0] - nocc[0], nmo[1] - nocc[1])
     mo_energy = numpy.asarray(mf.mo_energy)
-    
+
     if nocc_act is None:
         nocc_act = nocc
     else:
@@ -118,7 +142,7 @@ def get_pyscf_input_mol_u(
     else:
         nvir_act = (min(nvir[0], nvir_act[0]), min(nvir[1], nvir_act[1]))
     nmo_act = (nocc_act[0] + nvir_act[0], nocc_act[1] + nvir_act[1])
-    mo_energy_act =[
+    mo_energy_act = [
         mo_energy[0, (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])],
         mo_energy[1, (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])]]
 
@@ -139,18 +163,18 @@ def get_pyscf_input_mol_u(
     mo = mf.mo_coeff
     ijslice = [
         (
-            nocc[0]-nocc_act[0], nocc[0]+nvir_act[0], 
+            nocc[0]-nocc_act[0], nocc[0]+nvir_act[0],
             nocc[0]-nocc_act[0], nocc[0]+nvir_act[0]),
         (
-            nocc[1]-nocc_act[1], nocc[1]+nvir_act[1], 
+            nocc[1]-nocc_act[1], nocc[1]+nvir_act[1],
             nocc[1]-nocc_act[1], nocc[1]+nvir_act[1]),
     ]
     Lpq_a = None
     Lpq_b = None
-    Lpq_a = _ao2mo.nr_e2(mf.with_df._cderi, mo[0], ijslice[0], 
+    Lpq_a = _ao2mo.nr_e2(mf.with_df._cderi, mo[0], ijslice[0],
                          aosym='s2', out=Lpq_a)
     Lpq_a = Lpq_a.reshape(naux, nmo_act[0], nmo_act[0])
-    Lpq_b = _ao2mo.nr_e2(mf.with_df._cderi, mo[1], ijslice[1], 
+    Lpq_b = _ao2mo.nr_e2(mf.with_df._cderi, mo[1], ijslice[1],
                          aosym='s2', out=Lpq_b)
     Lpq_b = Lpq_b.reshape(naux, nmo_act[1], nmo_act[1])
     Lpq = [Lpq_a, Lpq_b]
@@ -163,17 +187,17 @@ def get_pyscf_input_mol_u(
         f.close()
 
     print("\nget input for lib_pprpa from PySCF (molecule)")
-    print("nmo = %-d (%-d alpha, %-d beta)" % 
+    print("nmo = %-d (%-d alpha, %-d beta)" %
           (nmo[0] + nmo[1], nmo[0], nmo[1]), end=', ')
-    print("nocc = %-d (%-d alpha, %-d beta)" % 
+    print("nocc = %-d (%-d alpha, %-d beta)" %
           (nocc[0] + nocc[1], nocc[0], nocc[1]), end=', ')
-    print("nvir = %-d (%-d alpha, %-d beta)" % 
+    print("nvir = %-d (%-d alpha, %-d beta)" %
           (nvir[0] + nvir[1], nvir[0], nvir[1]))
-    print("nmo_act = %-d (%-d alpha, %-d beta)" % 
+    print("nmo_act = %-d (%-d alpha, %-d beta)" %
           (nmo_act[0] + nmo_act[1], nmo_act[0], nmo_act[1]), end=', ')
-    print("nocc_act = %-d (%-d alpha, %-d beta)" % 
+    print("nocc_act = %-d (%-d alpha, %-d beta)" %
           (nocc_act[0] + nocc_act[1], nocc_act[0], nocc_act[1]), end=', ')
-    print("nvir_act = %-d (%-d alpha, %-d beta)" % 
+    print("nvir_act = %-d (%-d alpha, %-d beta)" %
           (nvir_act[0] + nvir_act[1], nvir_act[0], nvir_act[1]))
     print("naux = %-d" % naux)
     print("dump h5py file = %-s" % dump_file)
