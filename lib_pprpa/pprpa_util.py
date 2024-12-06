@@ -182,3 +182,59 @@ def stop_clock(clock_name):
     print("finish %-s." % clock_name)
     print('    CPU time for %s %s, wall time %s\n' %
           (clock_name, cpu_time, wall_time), flush=True)
+
+
+def get_nocc_nvir_frac(mo_occ, thresh=1.0e-8, sort_mo=False, mo_energy=None,
+        mo_coeff=None):
+    """Get number of occupied, fractionally occupied and virtual orbitals.
+    Fractionally occupied orbitals are considered as both occupied and virtual.
+    Reference: doi.org/10.1063/1.4817183.
+
+    Args:
+        mo_occ (double ndarray): occupation numbers of orbitals.
+        thresh (double, optional): threshold to determine fractional charge.
+            Defaults to 1.0e-5.
+
+    Returns:
+        nocc (int array): number of occupied orbitals, including fully
+            and fractionally occupied orbitals.
+        nvir (int array): number of virtual orbitals, including completely 
+            unoccupied and fractionally occupied orbitals.
+        frac_nocc (int array): number of fractionally occupied orbitals.
+    """
+    nspin = 2
+    nocc = numpy.zeros(shape=[2], dtype=int)
+    nvir = numpy.zeros_like(nocc)
+    nmo = numpy.zeros_like(nocc)
+    frac_nocc = numpy.zeros_like(nocc)
+
+    for s in range(nspin):
+        nmo[s] = len(mo_occ[s])
+        nocc[s] = len(numpy.argwhere(mo_occ[s] > thresh))
+        nvir[s] = len(numpy.argwhere(mo_occ[s] < (1.0 - thresh)))
+        frac_nocc[s] = nocc[s] + nvir[s] - nmo[s]
+
+    if sort_mo:
+        for s in range(nspin):
+            occ_index = numpy.where(mo_occ[s] > thresh)[0]
+            vir_index = numpy.where(mo_occ[s] < (1.0 - thresh))[0]
+            frac_index = numpy.asarray(
+                numpy.intersect1d(occ_index, vir_index))
+            int1_index = numpy.asarray(
+                [x for x in occ_index if x not in frac_index])
+            int0_index = numpy.asarray(
+                [x for x in vir_index if x not in frac_index])
+
+            spin = 'alpha' if s == 0 else 'beta'
+            mo_energy_int1 = mo_energy[s][int1_index]
+            mo_energy_frac = mo_energy[s][frac_index]
+            mo_energy_int0 = mo_energy[s][int0_index]
+            mo_energy[s] = numpy.concatenate(
+                (mo_energy_int1, mo_energy_frac, mo_energy_int0))
+            mo_coeff_int1 = mo_coeff[s][int1_index]
+            mo_coeff_frac = mo_coeff[s][frac_index]
+            mo_coeff_int0 = mo_coeff[s][int0_index]
+            mo_coeff[s] = numpy.concatenate(
+                (mo_coeff_int1, mo_coeff_frac, mo_coeff_int0))
+
+    return nocc, nvir, frac_nocc

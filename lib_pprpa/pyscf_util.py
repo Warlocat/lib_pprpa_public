@@ -2,7 +2,7 @@ import h5py
 import numpy
 
 from lib_pprpa.analyze import get_pprpa_nto, get_pprpa_dm
-from lib_pprpa.pprpa_util import start_clock, stop_clock
+from lib_pprpa.pprpa_util import start_clock, stop_clock, get_nocc_nvir_frac
 
 
 # get input from PySCF
@@ -245,6 +245,127 @@ def get_pyscf_input_mol_u(
     return nocc_act, mo_energy_act, Lpq
 
 
+def get_pyscf_input_mol_frac(
+        mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
+        sort_mo=True):
+    """Get ppRPA input from a PySCF unrestricted calculation.
+
+    Args:
+        mf (pyscf.scf.UHF/pyscf.dft.UKS): molecular mean-field object.
+
+    Kwargs:
+        auxbasis (str): name of the auxiliary basis set. Default to None.
+        nocc_act (tuple of int): number of active occupied orbitals,
+            (Nalpha, Nbeta). Default to None.
+        nvir_act (tuple of int): number of active virtual orbitals,
+            (Nalpha, Nbeta). Default to None.
+        dump_file (str): name of the file to dump matrices for lib_pprpa.
+            Default to None.
+
+    Returns:
+        nocc_act (tuple of int): number of occupied orbitals
+            in the active space.
+        mo_energy_act (list of double ndarray): orbital energies in the active space.
+        Lpq (list of double ndarray): three-center density fitting matrix
+            in the active MO space.
+    """
+    from pyscf import df
+    from pyscf.ao2mo import _ao2mo
+
+    start_clock("getting input for ppRPA with fractional occupation from PySCF")
+
+    nmo = (len(mf.mo_energy[0]), len(mf.mo_energy[1]))
+    if sort_mo is True:
+        nocc, nvir, frac_nocc = get_nocc_nvir_frac(
+            mf.mo_occ, sort_mo=True, mo_energy=mf.mo_energy, 
+            mo_coeff=mf.mo_coeff)
+    else:
+        nocc, nvir, frac_nocc = get_nocc_nvir_frac(mf.mo_occ)
+    mo_energy = numpy.array(mf.mo_energy)
+    mo_coeff = numpy.array(mf.mo_coeff)
+
+    if nocc_act is None:
+        nocc_act = nocc
+    else:
+        if isinstance(nocc_act, (int, numpy.int64)):
+            nocc_act = [nocc_act, nocc_act]
+        nocc_act = (min(nocc[0], nocc_act[0]), min(nocc[1], nocc_act[1]))
+    if nvir_act is None:
+        nvir_act = nvir
+    else:
+        if isinstance(nvir_act, (int, numpy.int64)):
+            nvir_act = [nvir_act, nvir_act]
+        nvir_act = (min(nvir[0], nvir_act[0]), min(nvir[1], nvir_act[1]))
+    nmo_act = (
+        nocc_act[0] + nvir_act[0] - frac_nocc[0], 
+        nocc_act[1] + nvir_act[1] - frac_nocc[1])
+    mo_energy_act = [
+        mo_energy[0, (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])],
+        mo_energy[1, (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])]]
+    mo_occ= [
+        mf.mo_occ[0, (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])],
+        mf.mo_occ[1, (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])]]
+
+    if getattr(mf, 'with_df', None):
+        pass
+    else:
+        mf.with_df = df.DF(mf.mol)
+        if auxbasis is not None:
+            mf.with_df.auxbasis = auxbasis
+        else:
+            try:
+                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
+            except:
+                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=False)
+        mf._keys.update(['with_df'])
+
+    naux = mf.with_df.get_naoaux()
+    ijslice = [
+        (
+            nocc[0]-nocc_act[0], nocc[0]+nvir_act[0]-frac_nocc[0],
+            nocc[0]-nocc_act[0], nocc[0]+nvir_act[0]-frac_nocc[0]),
+        (
+            nocc[1]-nocc_act[1], nocc[1]+nvir_act[1]-frac_nocc[1],
+            nocc[1]-nocc_act[1], nocc[1]+nvir_act[1]-frac_nocc[1]),
+    ]
+    Lpq_a = None
+    Lpq_b = None
+    Lpq_a = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff[0], ijslice[0],
+                         aosym='s2', out=Lpq_a)
+    Lpq_a = Lpq_a.reshape(naux, nmo_act[0], nmo_act[0])
+    Lpq_b = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff[1], ijslice[1],
+                         aosym='s2', out=Lpq_b)
+    Lpq_b = Lpq_b.reshape(naux, nmo_act[1], nmo_act[1])
+    Lpq = [Lpq_a, Lpq_b]
+
+    if dump_file is not None:
+        f = h5py.File(name="%s.h5" % dump_file, mode="w")
+        f["nocc"] = numpy.asarray(nocc_act)
+        f["mo_energy"] = numpy.asarray(mo_energy_act)
+        f["Lpq"] = numpy.asarray(Lpq)
+        f.close()
+
+    print("\nget input for lib_pprpa from PySCF (molecule)")
+    print("nmo = %-d (%-d alpha, %-d beta)" %
+          (nmo[0] + nmo[1], nmo[0], nmo[1]), end=', ')
+    print("nocc = %-d (%-d alpha, %-d beta)" %
+          (nocc[0] + nocc[1], nocc[0], nocc[1]), end=', ')
+    print("nvir = %-d (%-d alpha, %-d beta)" %
+          (nvir[0] + nvir[1], nvir[0], nvir[1]))
+    print("nmo_act = %-d (%-d alpha, %-d beta)" %
+          (nmo_act[0] + nmo_act[1], nmo_act[0], nmo_act[1]), end=', ')
+    print("nocc_act = %-d (%-d alpha, %-d beta)" %
+          (nocc_act[0] + nocc_act[1], nocc_act[0], nocc_act[1]), end=', ')
+    print("nvir_act = %-d (%-d alpha, %-d beta)" %
+          (nvir_act[0] + nvir_act[1], nvir_act[0], nvir_act[1]))
+    print("naux = %-d" % naux)
+    print("dump h5py file = %-s" % dump_file)
+
+    stop_clock("getting input for ppRPA with fractional occupation from PySCF")
+
+    return mo_occ, mo_energy_act, Lpq
+
+
 def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
     """Get ppRPA input from a PySCF supercell SCF calculation.
 
@@ -352,3 +473,46 @@ def get_pprpa_dm_pyscf(mf, multi, state, xy, nocc, nvir):
     mo_coeff = numpy.asarray(mf.mo_coeff)
     return get_pprpa_dm(
         multi, state, xy, nocc, nvir, mo_coeff, nocc_full, full_return=False)
+
+
+def create_frac_scf_object(mf, frac_spin, frac_orb, frac_occ):
+    """Create a mean-field object with hacked get_occ function to allow
+    SCF calculations with fractional occupation numbers.
+
+    Args:
+        mf (PySCF mean-field object): unrestricted PySCF mean-field object.
+        frac_spin (int list): spin channel(s) for fractionally occupied 
+            orbitals. Options: [0] or [1] or [0, 1].
+        frac_orb (int list): orbital indices with fractional occupation
+            numbers.
+        frac_occ (double list): list of fractional occupation numbers.
+
+    Return:
+        frac_mf: hacked mean-field object with modified get_occ function.
+    """
+    import pyscf
+
+    frac_mf = mf
+    frac_mf.frac_spin_added = frac_spin
+    frac_mf.frac_orb_added = frac_orb
+    frac_mf.frac_occ_added = frac_occ
+
+    def get_occ(mf, mo_energy=None, mo_coeff=None):
+        "hacked get_occ function for PySCF"
+        if mo_energy is None: mo_energy = mf.mo_energy
+        if mo_coeff is None: mo_coeff = mf.mo_coeff
+        mo_occ = mf.mo_occ
+
+        for ispin in mf.frac_spin_added:
+            if len(mf.frac_spin_added) == 2:
+                for idx, iorb in enumerate(mf.frac_orb_added):
+                    mo_occ[ispin][iorb] = mf.frac_occ_added[ispin][idx]
+            else:
+                for idx, iorb in enumerate(mf.frac_orb_added):
+                    mo_occ[ispin][iorb] = mf.frac_occ_added[idx]
+        return mo_occ
+
+    if isinstance(mf, pyscf.scf.uhf.UHF):
+        pyscf.scf.uhf.UHF.get_occ = get_occ
+
+    return frac_mf
