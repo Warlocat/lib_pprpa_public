@@ -3,6 +3,8 @@ import numpy as np
 import scipy
 
 from lib_pprpa.analyze import pprpa_print_a_pair
+from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector, \
+    diagonalize_pprpa_singlet, diagonalize_pprpa_triplet
 from lib_pprpa.pprpa_util import ij2index, inner_product, start_clock, \
     stop_clock, print_citation, get_chemical_potential
 
@@ -16,12 +18,18 @@ def kernel(pprpa):
         ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
     else:
         ntri = min(pprpa.nroot * 4, pprpa.oo_dim)
-    tri_vec[:ntri], tri_vec_sig[:ntri] = _pprpa_get_trial_vector(
-        pprpa=pprpa, ntri=ntri)
-    mv_prod = np.zeros_like(tri_vec)
+
+    if pprpa.trial == "identity":
+        tri_vec[:ntri], tri_vec_sig[:ntri] = get_identity_trial_vector(
+            pprpa=pprpa, ntri=ntri)
+    elif pprpa.trial == "subspace":
+        tri_vec[:ntri], tri_vec_sig[:ntri] = get_subspace_trial_vector(
+            pprpa=pprpa, ntri=ntri, channel=pprpa.channel,
+            nocc_sub=pprpa.nocc_sub, nvir_sub=pprpa.nvir_sub)
 
     iter = 0
     nprod = 0  # number of contracted vectors
+    mv_prod = np.zeros_like(tri_vec)  # ppRPA matrix vector product
     while iter < pprpa.max_iter:
         print(
             "\nppRPA Davidson %d-th iteration, ntri= %d , nprod= %d ." %
@@ -123,7 +131,7 @@ def kernel(pprpa):
 
 
 # Davidson algorithm functions
-def _pprpa_get_trial_vector(pprpa, ntri):
+def get_identity_trial_vector(pprpa, ntri):
     """Generate initial trial vectors in particle-particle or hole-hole channel.
     The order is determined by the pair orbital energy summation.
     The initial trial vectors are diagonal, and signatures are all 1 or -1.
@@ -231,6 +239,66 @@ def _pprpa_get_trial_vector(pprpa, ntri):
     return tri_vec, tri_vec_sig
 
 
+def get_subspace_trial_vector(pprpa, ntri, channel, nocc_sub=40, nvir_sub=40):
+    """Get trial vector from subspace diagonalization.
+
+    Parameters
+    ----------
+    pprpa : ppRPA_Davidson
+        ppRPA_Davidson object.
+    ntri : int
+        number of trial vectors.
+    channel : str
+        channel to get ppRPA roots. "pp" or "hh".
+    nocc_sub : int, optional
+        number of occupied orbitals in the subspace, by default 40
+    nvir_sub : int, optional
+        number of virtual orbitals in the subspace, by default 40
+
+    Returns
+    -------
+    tri_vec: double ndarray
+        initial trial vector.
+    tri_vec_sig: double array
+        signature of initial trial vector.
+    """
+    nocc_sub = min(pprpa.nocc, nocc_sub)
+    nvir_sub = min(pprpa.nvir, nvir_sub)
+
+    start, end = pprpa.nocc - nocc_sub, pprpa.nocc + nvir_sub
+    mo_energy_sub = pprpa.mo_energy[start:end]
+    if pprpa._use_Lov is True:
+        Lpq_sub = np.concatenate(
+            (pprpa.Lpi[:, :, start:], pprpa.Lpa[:, :, :nvir_sub]), axis=2)
+        Lpq_sub = Lpq_sub[:, start:end, :]
+    else:
+        Lpq_sub = pprpa.Lpq[:, start:end, start:end]
+    if pprpa.multi == "s":
+        xy_sub = diagonalize_pprpa_singlet(nocc_sub, mo_energy_sub, Lpq_sub)[1]
+    else:
+        xy_sub = diagonalize_pprpa_triplet(nocc_sub, mo_energy_sub, Lpq_sub)[1]
+
+    if pprpa.multi == "s":
+        oo_dim = int((pprpa.nocc + 1) * pprpa.nocc / 2)
+        oo_dim_sub = int((nocc_sub + 1) * nocc_sub / 2)
+        vv_dim_sub = int((nvir_sub + 1) * nvir_sub / 2)
+    elif pprpa.multi == "t":
+        oo_dim = int((pprpa.nocc - 1) * pprpa.nocc / 2)
+        oo_dim_sub = int((nocc_sub - 1) * nocc_sub / 2)
+        vv_dim_sub = int((nvir_sub - 1) * nvir_sub / 2)
+
+    tri_vec = np.zeros(shape=[ntri, pprpa.full_dim], dtype=np.double)
+    tri_vec_sig = np.zeros(shape=[ntri], dtype=np.double)
+    start, end = oo_dim - oo_dim_sub, oo_dim + vv_dim_sub
+    if channel == "pp":
+        tri_vec[:, start:end] = xy_sub[oo_dim_sub : oo_dim_sub + ntri]
+        tri_vec_sig[:] = 1.0
+    else:
+        tri_vec[:, start:end] = np.flip(xy_sub[oo_dim_sub-ntri:oo_dim_sub], axis=0)
+        tri_vec_sig[:] = -1.0
+    return tri_vec, tri_vec_sig
+
+
 def _pprpa_contraction(pprpa, tri_vec):
     """ppRPA contraction.
 
@@ -245,6 +313,8 @@ def _pprpa_contraction(pprpa, tri_vec):
     naux = pprpa.naux
     mo_energy = pprpa.mo_energy
     Lpq = pprpa.Lpq
+    Lpi = pprpa.Lpi
+    Lpa = pprpa.Lpa
 
     ntri = tri_vec.shape[0]
     mv_prod = np.zeros(shape=[ntri, pprpa.full_dim], dtype=np.double)
@@ -266,14 +336,24 @@ def _pprpa_contraction(pprpa, tri_vec):
 
         # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
         Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
-        Lpq_z[:, :nocc] = np.matmul(Lpq[:, :, :nocc].reshape(naux * nmo, nocc), z_oo)
-        Lpq_z[:, nocc:] = np.matmul(Lpq[:, :, nocc:].reshape(naux * nmo, nvir), z_vv)
+        if pprpa._use_Lov is True:
+            Lpq_z[:, :nocc] = np.matmul(Lpi.reshape(naux * nmo, nocc), z_oo)
+            Lpq_z[:, nocc:] = np.matmul(Lpa.reshape(naux * nmo, nvir), z_vv)
+        else:
+            Lpq_z[:, :nocc] = np.matmul(
+                Lpq[:, :, :nocc].reshape(naux * nmo, nocc), z_oo)
+            Lpq_z[:, nocc:] = np.matmul(
+                Lpq[:, :, nocc:].reshape(naux * nmo, nvir), z_vv)
 
         # transpose and reshape for faster multiplication
         Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
         Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
-        # NOTE: here assuming Lpq[L,p,q] = Lpq[L,q,p]
-        prod_oo = np.matmul(Lpq_z[:nocc], Lpq[:, :, :nocc].reshape(naux * nmo, nocc))
+        # NOTE: here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
+        if pprpa._use_Lov is True:
+            prod_oo = np.matmul(Lpq_z[:nocc], Lpi.reshape(naux * nmo, nocc))
+        else:
+            prod_oo = np.matmul(
+                Lpq_z[:nocc], Lpq[:, :, :nocc].reshape(naux * nmo, nocc))
         if pprpa.multi == "s":
             prod_oo += prod_oo.T
         else:
@@ -282,7 +362,11 @@ def _pprpa_contraction(pprpa, tri_vec):
         prod_oo = prod_oo.T
         prod_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
 
-        prod_vv = np.matmul(Lpq_z[nocc:], Lpq[:, :, nocc:].reshape(naux * nmo, nvir))
+        if pprpa._use_Lov is True:
+            prod_vv = np.matmul(Lpq_z[nocc:], Lpa.reshape(naux * nmo, nvir))
+        else:
+            prod_vv = np.matmul(
+                Lpq_z[nocc:], Lpq[:, :, nocc:].reshape(naux * nmo, nvir))
         if pprpa.multi == "s":
             prod_vv += prod_vv.T
         else:
@@ -374,11 +458,6 @@ def _pprpa_expand_space(
             continue
 
         # convert residuals
-        # if pprpa.TDA == "pp":
-        #    residue[iroot][pprpa.oo_dim:] /= (exci[iroot] - orb_sum_vv)
-        # elif pprpa.TDA == "hh":
-        #    residue[iroot][:pprpa.oo_dim] /= -(exci[iroot] - orb_sum_oo)
-        # else:
         residue[iroot][:pprpa.oo_dim] /= -(exci[iroot] - orb_sum_oo)
         residue[iroot][pprpa.oo_dim:] /= (exci[iroot] - orb_sum_vv)
 
@@ -402,59 +481,6 @@ def _pprpa_expand_space(
 
     conv = True if ntri_old == ntri else False
     return conv, ntri
-
-
-# TODO: move this function to orthonormalize.py
-def pprpa_orthonormalize_eigenvector(multi, nocc, exci, xy):
-    """Orthonormalize ppRPA eigenvector.
-    The eigenvector is normalized as Y^2 - X^2 = 1.
-    This function will rewrite input exci and xy, after calling this function,
-    exci and xy will be re-ordered as [hole-hole, particle-particle].
-
-    Args:
-        multi (string): multiplicity.
-        nocc (int): number of occupied orbitals.
-        exci (double array): ppRPA eigenvalue.
-        xy (double ndarray): ppRPA eigenvector.
-    """
-    nroot = xy.shape[0]
-
-    if multi == "s":
-        oo_dim = int((nocc + 1) * nocc / 2)
-    elif multi == "t":
-        oo_dim = int((nocc - 1) * nocc / 2)
-
-    # determine the vector is pp or hh
-    sig = np.zeros(shape=[nroot], dtype=np.double)
-    for i in range(nroot):
-        sig[i] = 1 if inner_product(xy[i], xy[i], oo_dim) > 0 else -1
-
-    # eliminate parallel component
-    for i in range(nroot):
-        for j in range(i):
-            if abs(exci[i] - exci[j]) < 1.0e-7:
-                inp = inner_product(xy[i], xy[j], oo_dim)
-                xy[i] -= sig[j] * xy[j] * inp
-
-    # normalize
-    for i in range(nroot):
-        inp = inner_product(xy[i], xy[i], oo_dim)
-        inp = np.sqrt(abs(inp))
-        xy[i] /= inp
-
-    # re-order all states by signs, first hh then pp
-    hh_index = np.where(sig < 0)[0]
-    pp_index = np.where(sig > 0)[0]
-    exci_hh = exci[hh_index]
-    exci_pp = exci[pp_index]
-    exci[:len(hh_index)] = exci_hh
-    exci[len(hh_index):] = exci_pp
-    xy_hh = xy[hh_index]
-    xy_pp = xy[pp_index]
-    xy[:len(hh_index)] = xy_hh
-    xy[len(hh_index):] = xy_pp
-
-    return
 
 
 # analysis functions
@@ -566,18 +592,25 @@ def _analyze_pprpa_davidson(
 class ppRPA_Davidson():
     def __init__(
             self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=200,
-            max_iter=100, residue_thresh=1.0e-7, print_thresh=0.1):
+            max_iter=100, trial="identity", residue_thresh=1.0e-7,
+            print_thresh=0.1):
         # necessary input
         self.nocc = nocc  # number of occupied orbitals
         self.mo_energy = np.asarray(mo_energy)  # orbital energy
         # three-center density-fitting matrix in MO space
         self.Lpq = np.asarray(Lpq)
+        self._use_Lov = False  # use C-contiguous Lpq block for better performance
+        self.Lpi = None  # Lpi = Lpq[:, :, :nocc], C-contiguous
+        self.Lpa = None  # Lpa = Lpq[:, :, nocc:], C-contiguous
 
         # options
         self.channel = channel  # channel of desired states, particle-particle or hole-hole
         self.nroot = nroot  # number of desired roots
         self.max_vec = max_vec  # max size of trial vectors
         self.max_iter = max_iter  # max iteration
+        self.trial = trial  # mode to initialize trial vector
+        self.nocc_sub = 40  # number of occpuied orbitals in the trial vector subspace
+        self.nvir_sub = 40  # number of virtual orbitals in the trial vector subspace
         self.residue_thresh = residue_thresh  # residue threshold
         self.print_thresh = print_thresh  # threshold to print component
 
@@ -605,8 +638,6 @@ class ppRPA_Davidson():
         return
 
     def check_parameter(self):
-        assert self.Lpq.shape[1] == self.Lpq.shape[2] == self.nmo
-
         assert self.channel in ["pp", "hh"]
 
         assert self.multi in ["s", "t"]
@@ -638,15 +669,19 @@ class ppRPA_Davidson():
         print('naux = %d' % self.naux)
         print('nmo = %d' % self.nmo)
         print('nocc = %d nvir = %d' % (self.nocc, self.nvir))
-        print(
-            'occ-occ dimension = %d vir-vir dimension = %d' %
-            (self.oo_dim, self.vv_dim))
+        print("occ-occ dimension = %d vir-vir dimension = %d"
+              % (self.oo_dim, self.vv_dim))
         print('full dimension = %d' % self.full_dim)
         print('number of roots = %d' % self.nroot)
         print('max subspace size = %d' % self.max_vec)
         print('max iteration = %d' % self.max_iter)
+        print('trial vector = %s' % self.trial)
+        if self.trial == "subspace":
+            print("subspace nocc = %d nvir = %d" % (self.nocc_sub, self.nvir_sub))
         print('residue threshold = %.3e' % self.residue_thresh)
         print('print threshold = %.2f%%' % (self.print_thresh*100))
+        # experiment features
+        print("_use_Lov = %s" % self._use_Lov)
         print('')
         return
 
@@ -664,6 +699,13 @@ class ppRPA_Davidson():
     def kernel(self, multi):
         self.multi = multi
         self.check_parameter()
+
+        # TODO: directly take Lpi and Lpa in the future
+        if self._use_Lov is True and self.Lpq is not None:
+            self.Lpi = np.ascontiguousarray(self.Lpq[:, :, :self.nocc])
+            self.Lpa = np.ascontiguousarray(self.Lpq[:, :, self.nocc:])
+            self.Lpq = None
+
         self.dump_flags()
         self.check_memory()
         start_clock("ppRPA Davidson: %s" % multi)

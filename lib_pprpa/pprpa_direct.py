@@ -1,11 +1,12 @@
 import h5py
 import numpy
+import numpy as np
 import scipy
 
 from numpy import einsum
+import scipy.linalg
 
 from lib_pprpa.analyze import pprpa_print_a_pair, get_pprpa_oscillator_strength
-from lib_pprpa.pprpa_davidson import pprpa_orthonormalize_eigenvector
 from lib_pprpa.pprpa_util import inner_product, get_chemical_potential, start_clock, stop_clock, print_citation
 
 
@@ -331,6 +332,57 @@ def diagonalize_pprpa_ab(nocc, mo_energy, Lpq, mu=None):
     xy[:][:oo_dim] *= -1
 
     return exci, xy
+
+
+def pprpa_orthonormalize_eigenvector(multi, nocc, exci, xy):
+    """Orthonormalize ppRPA eigenvector.
+    The eigenvector is normalized as Y^2 - X^2 = 1.
+    This function will rewrite input exci and xy.
+    exci and xy will be re-ordered as [hole-hole, particle-particle].
+
+    Args:
+        multi (string): multiplicity.
+        nocc (int): number of occupied orbitals.
+        exci (double array): ppRPA eigenvalue.
+        xy (double ndarray): ppRPA eigenvector.
+    """
+    nroot = xy.shape[0]
+
+    if multi == "s":
+        oo_dim = int((nocc + 1) * nocc / 2)
+    elif multi == "t":
+        oo_dim = int((nocc - 1) * nocc / 2)
+
+    # determine the vector is pp or hh
+    sig = np.zeros(shape=[nroot], dtype=np.double)
+    for i in range(nroot):
+        sig[i] = 1 if inner_product(xy[i], xy[i], oo_dim) > 0 else -1
+
+    # eliminate parallel component
+    for i in range(nroot):
+        for j in range(i):
+            if abs(exci[i] - exci[j]) < 1.0e-7:
+                inp = inner_product(xy[i], xy[j], oo_dim)
+                xy[i] -= sig[j] * xy[j] * inp
+
+    # normalize
+    for i in range(nroot):
+        inp = inner_product(xy[i], xy[i], oo_dim)
+        xy[i] /= np.sqrt(abs(inp))
+
+    # re-order all states by signs, first hh then pp
+    hh_index = np.where(sig < 0)[0]
+    pp_index = np.where(sig > 0)[0]
+    exci_hh = exci[hh_index]
+    exci_pp = exci[pp_index]
+    exci[: len(hh_index)] = exci_hh
+    exci[len(hh_index) :] = exci_pp
+    xy_hh = xy[hh_index]
+    xy_pp = xy[pp_index]
+    xy[: len(hh_index)] = xy_hh
+    xy[len(hh_index) :] = xy_pp
+
+    return
 
 
 # analysis functions
