@@ -29,6 +29,11 @@ def get_pyscf_input_mol(
         return get_pyscf_input_mol_r(
             mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
             dump_file=dump_file, sort_mo=sort_mo)
+    
+    if isinstance(mf, pyscf.scf.ghf.GHF) or isinstance(mf, pyscf.dft.gks.GKS):
+        return get_pyscf_input_mol_g(
+            mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
+            dump_file=dump_file, sort_mo=sort_mo)
 
 
 def get_pyscf_input_mol_r(
@@ -244,6 +249,153 @@ def get_pyscf_input_mol_u(
 
     return nocc_act, mo_energy_act, Lpq
 
+def nr_e2_cross(eri, mo_coeff1, mo_coeff2, nocc, nocc_act, nvir_act,
+           aosym='s1', mosym='s1', out=None, ao_loc=None):
+    """Cross term of the eri integrals between two sets of orbitals."""
+    from pyscf.ao2mo import _ao2mo
+    mo_coeff = numpy.asarray(numpy.hstack((mo_coeff1, mo_coeff2)), order='F')
+    offset_mo1 = mo_coeff1.shape[1]
+    ijslice = (nocc-nocc_act, nocc+nvir_act, 
+               offset_mo1+nocc-nocc_act, offset_mo1+nocc+nvir_act)
+    return _ao2mo.nr_e2(eri, mo_coeff, ijslice, aosym, mosym, out, ao_loc)
+    
+def get_Lmo_ghf(mf, naux, nocc_act=None, nvir_act=None):
+    """ Get Lpq for GHF/JHF/JKS/JKS from PySCF.
+    """
+    from pyscf import scf, dft
+    from pyscf.ao2mo import _ao2mo
+    nao = mf.mol.nao_nr()
+    nocc = mf.mol.nelec[0] + mf.mol.nelec[1]
+    nmo = len(mf.mo_energy)
+    if isinstance(mf, scf.hf.RHF) or isinstance(mf, dft.rks.RKS):
+        nmo *= 2
+    nvir = nmo - nocc
+    nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
+    nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
+    nmo_act = nocc_act + nvir_act
+
+    if isinstance(mf, scf.ghf.GHF) or isinstance(mf, dft.gks.GKS):
+        mo_coeff_a = mf.mo_coeff[:nao, :]
+        mo_coeff_b = mf.mo_coeff[nao:, :]
+    elif isinstance(mf, scf.hf.RHF) or isinstance(mf, dft.rks.RKS):
+        mo_coeff_a = numpy.zeros((nao, nmo))
+        mo_coeff_b = numpy.zeros((nao, nmo))
+        for i in range(nmo//2):
+            mo_coeff_a[:, 2*i] = mf.mo_coeff[:, i]
+            mo_coeff_b[:, 2*i+1] = mf.mo_coeff[:, i]
+    else:
+        try:
+            from socutils.scf import spinor_hf
+            from socutils.dft import dft
+        except ImportError:
+            raise ImportError("socutils is required for JHF/JKS.")
+        if isinstance(mf, spinor_hf.SpinorSCF) or\
+                isinstance(mf, dft.SpinorDFT):
+            c2 = numpy.vstack(mf.mol.sph2spinor_coeff())
+            mo_sph = numpy.dot(c2, mf.mo_coeff)
+            mo_coeff_a = mo_sph[:nao, :]
+            mo_coeff_b = mo_sph[nao:, :]
+        else:
+            raise ValueError("mf should be GHF/GKS/JKS/JKS.")
+    
+    if mo_coeff_a.dtype == numpy.double: # if mo_coeff is real
+        ijslice = (nocc-nocc_act, nocc+nvir_act, nocc-nocc_act, nocc+nvir_act)
+        Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff_a, ijslice, aosym='s2')
+        Lpq += _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff_b, ijslice, aosym='s2')
+    elif mo_coeff_a.dtype == numpy.complex128: # if mo_coeff is complex
+        Lpq = numpy.zeros((naux, nmo_act*nmo_act), dtype=numpy.complex128)
+        Lpq += nr_e2_cross(mf.with_df._cderi, mo_coeff_a.real, mo_coeff_a.real, nocc, nocc_act, nvir_act, aosym='s2')
+        Lpq += nr_e2_cross(mf.with_df._cderi, mo_coeff_b.real, mo_coeff_b.real, nocc, nocc_act, nvir_act, aosym='s2')
+        Lpq += nr_e2_cross(mf.with_df._cderi, mo_coeff_a.imag, mo_coeff_a.imag, nocc, nocc_act, nvir_act, aosym='s2')
+        Lpq += nr_e2_cross(mf.with_df._cderi, mo_coeff_b.imag, mo_coeff_b.imag, nocc, nocc_act, nvir_act, aosym='s2')
+        Lpq += 1.0j * nr_e2_cross(mf.with_df._cderi, mo_coeff_a.real, mo_coeff_a.imag, nocc, nocc_act, nvir_act, aosym='s2')
+        Lpq += 1.0j * nr_e2_cross(mf.with_df._cderi, mo_coeff_b.real, mo_coeff_b.imag, nocc, nocc_act, nvir_act, aosym='s2')
+        Lpq -= 1.0j * nr_e2_cross(mf.with_df._cderi, mo_coeff_a.imag, mo_coeff_a.real, nocc, nocc_act, nvir_act, aosym='s2')
+        Lpq -= 1.0j * nr_e2_cross(mf.with_df._cderi, mo_coeff_b.imag, mo_coeff_b.real, nocc, nocc_act, nvir_act, aosym='s2')
+    else:
+        raise ValueError("mo_coeff should be either float64 or complex128.")
+
+    return Lpq.reshape(naux, nmo_act, nmo_act)
+
+def get_pyscf_input_mol_g(
+        mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
+        sort_mo=False):
+    """Get ppRPA input from a PySCF generalized or spinor-based calculation.
+
+    Args:
+        mf (RHF/RKS/GHF/GKS/JHF/JKS): molecular mean-field object.
+
+    Kwargs:
+        auxbasis (str): name of the auxiliary basis set. Default to None.
+        nocc_act (int): number of active occupied orbitals. Default to None.
+        nvir_act (int): number of active virtual orbitals. Default to None.
+        dump_file (str): name of the file to dump matrices for lib_pprpa.
+            Default to None.
+
+    Returns:
+        nocc_act (int): number of occupied orbitals in the active space.
+        mo_energy_act (double ndarray): orbital energies in the active space.
+        Lpq (double ndarray): three-center density fitting matrix
+            in the active MO space.
+    """
+
+    start_clock("getting input for generalized ppRPA from PySCF")
+
+    from pyscf.scf.hf import RHF
+    from pyscf.dft.rks import RKS
+    if isinstance(mf, RHF) or isinstance(mf, RKS):
+        nmo = len(mf.mo_energy)*2
+        mo_energy_ab = numpy.concatenate((mf.mo_energy, mf.mo_energy))
+        mo_energy = numpy.zeros_like(mo_energy_ab)
+        for i in range(len(mf.mo_energy)):
+            mo_energy[2*i] = mo_energy_ab[i]
+            mo_energy[2*i+1] = mo_energy_ab[i]
+    else:
+        nmo = len(mf.mo_energy)
+        mo_energy = mf.mo_energy
+    nocc = mf.mol.nelec[0] + mf.mol.nelec[1]
+    nvir = nmo - nocc
+
+    nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
+    nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
+    nmo_act = nocc_act + nvir_act
+    mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
+    
+    from pyscf import df
+    if getattr(mf, 'with_df', None):
+        pass
+    else:
+        mf.with_df = df.DF(mf.mol)
+        if auxbasis is not None:
+            mf.with_df.auxbasis = auxbasis
+        else:
+            try:
+                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
+            except:
+                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=False)
+        mf._keys.update(['with_df'])
+
+    naux = mf.with_df.get_naoaux()
+    Lpq = get_Lmo_ghf(mf, naux=naux, nocc_act=nocc_act, nvir_act=nvir_act)
+
+    if dump_file is not None:
+        f = h5py.File(name="%s.h5" % dump_file, mode="w")
+        f["nocc"] = numpy.asarray(nocc_act)
+        f["mo_energy"] = numpy.asarray(mo_energy_act)
+        f["Lpq"] = numpy.asarray(Lpq)
+        f.close()
+
+    print("\nget input for lib_pprpa from PySCF (molecule)")
+    print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" %
+          (nmo_act, nocc_act, nvir_act))
+    print("naux = %-d" % naux)
+    print("dump h5py file = %-s" % dump_file)
+
+    stop_clock("getting input for generalized ppRPA from PySCF")
+
+    return nocc_act, mo_energy_act, Lpq
+
 
 def get_pyscf_input_mol_frac(
         mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
@@ -413,6 +565,91 @@ def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
         tmp = _ao2mo.nr_e2(
             LpqR.reshape(-1, nao, nao), mo, ijslice, aosym='s1', mosym='s1',
             out=tmp)
+        Lpq.append(tmp)
+    Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
+
+    if dump_file is not None:
+        f = h5py.File(name="%s.h5" % dump_file, mode="w")
+        f["nocc"] = numpy.asarray(nocc_act)
+        f["mo_energy"] = numpy.asarray(mo_energy_act)
+        f["Lpq"] = numpy.asarray(Lpq)
+        f.close()
+
+    print("\nget input for lib_pprpa from PySCF (supercell)")
+    print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" %
+          (nmo_act, nocc_act, nvir_act))
+    print("naux = %-d" % naux)
+    print("dump h5py file = %-s" % dump_file)
+
+    stop_clock("getting input for supercell ppRPA from PySCF")
+
+    return nocc_act, mo_energy_act, Lpq
+
+
+def get_pyscf_input_sc_g(kmf, nocc_act=None, nvir_act=None, dump_file=None):
+    """Get ppRPA input from a PySCF supercell SCF calculation.
+
+    Args:
+        mf (pyscf.pbc.scf.GHF/pyscf.pbc.dft.GKS): supercell mean-field object.
+        nocc_act (int, optional): number of active occupied orbitals. Defaults to None.
+        nvir_act (int, optional): number of active virtual orbitals. Defaults to None.
+        dump_file (str, optional): file name to dump matrix for lib_pprpa. Defaults to None.
+
+    Returns:
+        nocc_act (int): number of occupied orbitals in the active space.
+        mo_energy_act (double array): orbital energy in the active space.
+        Lpq (double/complex ndarray): three-center density-fitting matrix in active MO space.
+    """
+    from pyscf import lib
+    from pyscf.ao2mo import _ao2mo
+    from pyscf.pbc.df.fft_ao2mo import _format_kpts
+
+    start_clock("getting input for supercell ppRPA from PySCF")
+
+    nmo = len(kmf.mo_energy)
+    nocc = int(numpy.sum(kmf.mo_occ))
+    nvir = nmo - nocc
+    mo_energy = numpy.array(kmf.mo_energy)
+    mo_coeff = numpy.asarray(kmf.mo_coeff)
+    nao = mo_coeff.shape[0]//2
+    naux = kmf.with_df.get_naoaux()
+    kpts = kmf.with_df.kpts
+    max_memory = max(
+        4000, kmf.max_memory-lib.current_memory()[0]-nao**2*naux*8/1e6)
+
+    nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
+    nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
+    nmo_act = nocc_act + nvir_act
+    mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
+
+    from pyscf.pbc import scf, dft
+    if isinstance(kmf, scf.ghf.GHF) or isinstance(kmf, dft.gks.GKS):
+        mo_coeff_a = kmf.mo_coeff[:nao, :]
+        mo_coeff_b = kmf.mo_coeff[nao:, :]
+    else:
+        raise ValueError("kmf should be GHF/JHF/JKS/JKS.")
+
+    ijslice = (nocc-nocc_act, nocc+nvir_act, nocc-nocc_act, nocc+nvir_act)
+
+    kptijkl = _format_kpts(kpts)
+    Lpq = []
+    for LpqR, _, _ in kmf.with_df.sr_loop(
+            kptijkl[: 2], max_memory=0.8 * max_memory, compact=False):
+        LpqR = LpqR.reshape(-1, nao, nao)
+        if mo_coeff_a.dtype == numpy.double:
+            tmp = _ao2mo.nr_e2(LpqR, mo_coeff_a, ijslice, aosym='s1', mosym='s1')
+            tmp += _ao2mo.nr_e2(LpqR, mo_coeff_b, ijslice, aosym='s1', mosym='s1')
+        elif mo_coeff_a.dtype == numpy.complex128:
+            tmp = numpy.zeros((LpqR.shape[0], nmo_act*nmo_act), dtype=numpy.complex128)
+            tmp += nr_e2_cross(LpqR, mo_coeff_a.real, mo_coeff_a.real, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
+            tmp += nr_e2_cross(LpqR, mo_coeff_b.real, mo_coeff_b.real, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
+            tmp += nr_e2_cross(LpqR, mo_coeff_a.imag, mo_coeff_a.imag, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
+            tmp += nr_e2_cross(LpqR, mo_coeff_b.imag, mo_coeff_b.imag, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
+            tmp += 1.0j * nr_e2_cross(LpqR, mo_coeff_a.real, mo_coeff_a.imag, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
+            tmp += 1.0j * nr_e2_cross(LpqR, mo_coeff_b.real, mo_coeff_b.imag, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
+            tmp -= 1.0j * nr_e2_cross(LpqR, mo_coeff_a.imag, mo_coeff_a.real, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
+            tmp -= 1.0j * nr_e2_cross(LpqR, mo_coeff_b.imag, mo_coeff_b.real, nocc, nocc_act, nvir_act, aosym='s1', mosym='s1')
         Lpq.append(tmp)
     Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
 

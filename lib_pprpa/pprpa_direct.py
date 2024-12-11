@@ -1,6 +1,5 @@
 import h5py
 import numpy
-import numpy as np
 import scipy
 
 from numpy import einsum
@@ -202,7 +201,7 @@ def diagonalize_pprpa_triplet(nocc, mo_energy, Lpq, mu=None):
     # combine A, B and C matrix as
     # | C B^T |
     # |B A|
-    M_upper = numpy.concatenate((C, B.T), axis=1)
+    M_upper = numpy.concatenate((C, B.T.conj()), axis=1) # B.T.conj() for complex GHF
     M_lower = numpy.concatenate((B, A), axis=1)
     M = numpy.concatenate((M_upper, M_lower), axis=0)
     del A, B, C
@@ -344,7 +343,7 @@ def pprpa_orthonormalize_eigenvector(multi, nocc, exci, xy):
         multi (string): multiplicity.
         nocc (int): number of occupied orbitals.
         exci (double array): ppRPA eigenvalue.
-        xy (double ndarray): ppRPA eigenvector.
+        xy (double/complex ndarray): ppRPA eigenvector.
     """
     nroot = xy.shape[0]
 
@@ -354,25 +353,25 @@ def pprpa_orthonormalize_eigenvector(multi, nocc, exci, xy):
         oo_dim = int((nocc - 1) * nocc / 2)
 
     # determine the vector is pp or hh
-    sig = np.zeros(shape=[nroot], dtype=np.double)
+    sig = numpy.zeros(shape=[nroot], dtype=numpy.double)
     for i in range(nroot):
-        sig[i] = 1 if inner_product(xy[i], xy[i], oo_dim) > 0 else -1
+        sig[i] = 1 if inner_product(xy[i].conj(), xy[i], oo_dim).real > 0 else -1
 
     # eliminate parallel component
     for i in range(nroot):
         for j in range(i):
             if abs(exci[i] - exci[j]) < 1.0e-7:
-                inp = inner_product(xy[i], xy[j], oo_dim)
-                xy[i] -= sig[j] * xy[j] * inp
+                inp = inner_product(xy[j].conj(), xy[i], oo_dim) / inner_product(xy[j].conj(), xy[j], oo_dim).real
+                xy[i] -= xy[j] * inp
 
     # normalize
     for i in range(nroot):
-        inp = inner_product(xy[i], xy[i], oo_dim)
-        xy[i] /= np.sqrt(abs(inp))
+        inp = inner_product(xy[i].conj(), xy[i], oo_dim).real
+        xy[i] /= numpy.sqrt(abs(inp))
 
     # re-order all states by signs, first hh then pp
-    hh_index = np.where(sig < 0)[0]
-    pp_index = np.where(sig > 0)[0]
+    hh_index = numpy.where(sig < 0)[0]
+    pp_index = numpy.where(sig > 0)[0]
     exci_hh = exci[hh_index]
     exci_pp = exci[pp_index]
     exci[: len(hh_index)] = exci_hh
@@ -419,7 +418,7 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
     au2ev = 27.211386
 
     for istate in range(min(hh_state, oo_dim)):
-        print("#%-d %s de-excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+        print("#%-d %s de-excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, multi, (exci[oo_dim-istate-1] - exci0) * au2ev,
                exci[oo_dim-istate-1] * au2ev))
         full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
@@ -441,7 +440,7 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
         print("")
 
     for istate in range(min(pp_state, vv_dim)):
-        print("#%-d %s excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+        print("#%-d %s excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, multi, (exci[oo_dim+istate] - exci0) * au2ev,
                exci[oo_dim+istate] * au2ev))
         full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
@@ -516,7 +515,7 @@ def _analyze_pprpa_direct_ab(
     au2ev = 27.211386
     print("\n     print ppRPA excitations: alpha-beta block\n")
     for istate in range(min(hh_state, oo_dim)):
-        print("#%-d ab de-excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+        print("#%-d ab de-excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, (exci[oo_dim-istate-1] - exci0) * au2ev,
                exci[oo_dim-istate-1] * au2ev))
         if mo_dip is not None:
@@ -543,7 +542,7 @@ def _analyze_pprpa_direct_ab(
         print("")
 
     for istate in range(min(pp_state, vv_dim)):
-        print("#%-d ab excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+        print("#%-d ab excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, (exci[oo_dim+istate] - exci0) * au2ev,
                exci[oo_dim+istate] * au2ev))
         if mo_dip is not None:
