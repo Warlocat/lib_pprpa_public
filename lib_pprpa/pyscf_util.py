@@ -516,3 +516,56 @@ def create_frac_scf_object(mf, frac_spin, frac_orb, frac_occ):
         pyscf.scf.uhf.UHF.get_occ = get_occ
 
     return frac_mf
+
+
+def get_fxc_r(mf):
+    import pyscf
+    dm0 = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
+    ni = mf._numint
+    make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=1, with_lapl=False)[0]
+    xctype = ni._xc_type(mf.xc)
+    mem_now = pyscf.lib.current_memory()[0]
+    max_memory = max(2000, mf.max_memory * 0.8 - mem_now)
+
+    mo_coeff = mf.mo_coeff
+    nao = mo_coeff.shape[0]
+    nmo = mo_coeff.shape[1]
+
+    fxc_mat = numpy.zeros((nmo, nmo, nmo, nmo))
+    if xctype == 'LDA':
+        ao_deriv = 0
+        for ao, mask, weight, coords \
+                in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
+            rho = make_rho(0, ao, mask, xctype)
+            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+            wfxc = fxc[0, 0] * weight
+
+            mo_value = numpy.einsum('rm,mp->rp', ao, mo_coeff, optimize=True)
+            rho_value = numpy.einsum(
+                'rp,rq->rpq', mo_value, mo_value, optimize=True)
+            w_rho = numpy.einsum('rpq,r->rpq', rho_value, wfxc, optimize=True)
+            w = numpy.einsum(
+                'rpq,rmn->pqmn', rho_value, w_rho, optimize=True) * 2
+            fxc_mat += w.transpose(0, 3, 1, 2)
+
+    elif xctype == 'GGA':
+        ao_deriv = 1
+        for ao, mask, weight, coords \
+                in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
+            rho = make_rho(0, ao, mask, xctype)
+            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+            wfxc = fxc * weight
+            mo_value = numpy.einsum('xrm,mp->xrp', ao, mo_coeff, optimize=True)
+            rho_value = numpy.einsum(
+                'xrp,rq->xrpq', mo_value, mo_value[0], optimize=True)
+            rho_value[1:4] += numpy.einsum(
+                'rp,xrq->xrpq', mo_value[0], mo_value[1:4], optimize=True)
+            w_rho = numpy.einsum(
+                'xyr,xrpq->yrpq', wfxc, rho_value, optimize=True)
+            w = numpy.einsum('xrpq,xrmn->pqmn', w_rho, rho_value, optimize=True)
+            fxc_mat += w.transpose(0, 3, 1, 2)
+
+    elif xctype == 'MGGA':
+        raise NotImplementedError
+
+    return fxc_mat
