@@ -5,20 +5,26 @@ import scipy
 from lib_pprpa.analyze import pprpa_print_a_pair
 from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector, \
     diagonalize_pprpa_singlet, diagonalize_pprpa_triplet
+
 from lib_pprpa.pprpa_util import ij2index, inner_product, start_clock, \
     stop_clock, print_citation, get_chemical_potential
 
 
 def kernel(pprpa):
     # initialize trial vector and product matrix
+    if pprpa._use_Lov:
+        data_type = pprpa.Lpi.dtype
+    else:
+        data_type = pprpa.Lpq.dtype
+    # the maximum size is max_vec + nroot for compacting
+    tri_size = pprpa.max_vec + pprpa.nroot
     tri_vec = np.zeros(
-        shape=[pprpa.max_vec, pprpa.full_dim], dtype=np.double)
-    tri_vec_sig = np.zeros(shape=[pprpa.max_vec], dtype=np.double)
+        shape=[tri_size, pprpa.full_dim], dtype=data_type)
+    tri_vec_sig = np.zeros(shape=[tri_size], dtype=data_type)
     if pprpa.channel == "pp":
         ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
     else:
         ntri = min(pprpa.nroot * 4, pprpa.oo_dim)
-
     if pprpa.trial == "identity":
         tri_vec[:ntri], tri_vec_sig[:ntri] = get_identity_trial_vector(
             pprpa=pprpa, ntri=ntri)
@@ -26,6 +32,8 @@ def kernel(pprpa):
         tri_vec[:ntri], tri_vec_sig[:ntri] = get_subspace_trial_vector(
             pprpa=pprpa, ntri=ntri, channel=pprpa.channel,
             nocc_sub=pprpa.nocc_sub, nvir_sub=pprpa.nvir_sub)
+    else:
+        raise ValueError("trial vector method not recognized.")
 
     iter = 0
     nprod = 0  # number of contracted vectors
@@ -33,82 +41,23 @@ def kernel(pprpa):
     while iter < pprpa.max_iter:
         print(
             "\nppRPA Davidson %d-th iteration, ntri= %d , nprod= %d ." %
-            (iter + 1, ntri, nprod))
-        mv_prod[nprod:ntri] = _pprpa_contraction(
-            pprpa=pprpa, tri_vec=tri_vec[nprod:ntri])
+            (iter + 1, ntri, nprod), flush=True)
+        mv_prod[nprod:ntri] = pprpa.contraction(tri_vec=tri_vec[nprod:ntri])
         nprod = ntri
 
-        # get ppRPA matrix and metric matrix in subspace
-        m_tilde = np.matmul(tri_vec[:ntri], mv_prod[:ntri].T)
-        w_tilde = np.zeros_like(m_tilde)
-        for i in range(ntri):
-            if inner_product(tri_vec[i], tri_vec[i], pprpa.oo_dim) > 0:
-                w_tilde[i, i] = 1
-            else:
-                w_tilde[i, i] = -1
+        first_state, v_tri = _pprpa_subspace_diag(
+            pprpa=pprpa, ntri=ntri, tri_vec=tri_vec,
+            tri_vec_sig=tri_vec_sig, mv_prod=mv_prod)
 
-        # diagonalize subspace matrix
-        alphar, _, beta, _, v_tri, _, _ = scipy.linalg.lapack.dggev(
-            m_tilde, w_tilde, compute_vl=0)
-        e_tri = alphar / beta
-        v_tri = v_tri.T  # Fortran matrix to Python order
-
-        if pprpa.channel == "pp":
-            # sort eigenvalues and eigenvectors by ascending order
-            idx = e_tri.argsort()
-            e_tri = e_tri[idx]
-            v_tri = v_tri[idx, :]
-
-            # re-order all states by signs, first hh then pp
-            sig = np.zeros(shape=[ntri], dtype=int)
-            for i in range(ntri):
-                if np.sum((v_tri[i] ** 2) * tri_vec_sig[: ntri]) > 0:
-                    sig[i] = 1
-                else:
-                    sig[i] = -1
-
-            hh_index = np.where(sig < 0)[0]
-            pp_index = np.where(sig > 0)[0]
-            e_tri_hh = e_tri[hh_index]
-            e_tri_pp = e_tri[pp_index]
-            e_tri[:len(hh_index)] = e_tri_hh
-            e_tri[len(hh_index):] = e_tri_pp
-            v_tri_hh = v_tri[hh_index]
-            v_tri_pp = v_tri[pp_index]
-            v_tri[:len(hh_index)] = v_tri_hh
-            v_tri[len(hh_index):] = v_tri_pp
-
-            # get only two-electron addition energy
-            first_state=len(hh_index)
-            pprpa.exci = e_tri[first_state:first_state+pprpa.nroot]
-        else:
-            # sort eigenvalues and eigenvectors by descending order
-            idx = e_tri.argsort()[::-1]
-            e_tri = e_tri[idx]
-            v_tri = v_tri[idx, :]
-
-            # re-order all states by signs, first pp then hh
-            sig = np.zeros(shape=[ntri], dtype=int)
-            for i in range(ntri):
-                if np.sum((v_tri[i] ** 2) * tri_vec_sig[:ntri]) > 0:
-                    sig[i] = 1
-                else:
-                    sig[i] = -1
-
-            hh_index = np.where(sig < 0)[0]
-            pp_index = np.where(sig > 0)[0]
-            e_tri_hh = e_tri[hh_index]
-            e_tri_pp = e_tri[pp_index]
-            e_tri[:len(pp_index)] = e_tri_pp
-            e_tri[len(pp_index):] = e_tri_hh
-            v_tri_hh = v_tri[hh_index]
-            v_tri_pp = v_tri[pp_index]
-            v_tri[:len(pp_index)] = v_tri_pp
-            v_tri[len(pp_index):] = v_tri_hh
-
-            # get only two-electron removal energy
-            first_state=len(pp_index)
-            pprpa.exci = e_tri[first_state:first_state+pprpa.nroot]
+        # If the subspace is too large, compact the subspace
+        if ntri > pprpa.max_vec and pprpa._compact_subspace is True:
+            ntri = _pprpa_compact_space(
+            pprpa=pprpa, first_state=first_state, tri_vec=tri_vec,
+            tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
+            nprod = 0
+            first_state, v_tri = _pprpa_subspace_diag(
+                pprpa=pprpa, ntri=ntri, tri_vec=tri_vec,
+                tri_vec_sig=tri_vec_sig, mv_prod=mv_prod)
 
         ntri_old = ntri
         conv, ntri = _pprpa_expand_space(
@@ -239,7 +188,7 @@ def get_identity_trial_vector(pprpa, ntri):
     return tri_vec, tri_vec_sig
 
 
-def get_subspace_trial_vector(pprpa, ntri, channel, nocc_sub=40, nvir_sub=40):
+def get_subspace_trial_vector(pprpa, ntri, channel=None, nocc_sub=40, nvir_sub=40):
     """Get trial vector from subspace diagonalization.
 
     Parameters
@@ -248,8 +197,8 @@ def get_subspace_trial_vector(pprpa, ntri, channel, nocc_sub=40, nvir_sub=40):
         ppRPA_Davidson object.
     ntri : int
         number of trial vectors.
-    channel : str
-        channel to get ppRPA roots. "pp" or "hh".
+    channel : str, optional
+        channel to get ppRPA roots. "pp" or "hh", by default pprpa.channel
     nocc_sub : int, optional
         number of occupied orbitals in the subspace, by default 40
     nvir_sub : int, optional
@@ -262,8 +211,24 @@ def get_subspace_trial_vector(pprpa, ntri, channel, nocc_sub=40, nvir_sub=40):
     tri_vec_sig: double array
         signature of initial trial vector.
     """
+    if channel is None:
+        channel = pprpa.channel
+
     nocc_sub = min(pprpa.nocc, nocc_sub)
     nvir_sub = min(pprpa.nvir, nvir_sub)
+    if pprpa.multi == "s":
+        oo_dim_sub = int((nocc_sub + 1) * nocc_sub / 2)
+        vv_dim_sub = int((nvir_sub + 1) * nvir_sub / 2)
+        is_singlet = 1
+    elif pprpa.multi == "t":
+        oo_dim_sub = int((nocc_sub - 1) * nocc_sub / 2)
+        vv_dim_sub = int((nvir_sub - 1) * nvir_sub / 2)
+        is_singlet = 0
+
+    if ntri > oo_dim_sub + vv_dim_sub:
+        print("Number of trial vectors exceeds subspace size.")
+        print("Use identity trial vectors instead.")
+        return get_identity_trial_vector(pprpa, ntri)
 
     start, end = pprpa.nocc - nocc_sub, pprpa.nocc + nvir_sub
     mo_energy_sub = pprpa.mo_energy[start:end]
@@ -276,26 +241,37 @@ def get_subspace_trial_vector(pprpa, ntri, channel, nocc_sub=40, nvir_sub=40):
     if pprpa.multi == "s":
         xy_sub = diagonalize_pprpa_singlet(nocc_sub, mo_energy_sub, Lpq_sub)[1]
     else:
+        # GppRPA shares the same diagonalization function with triplet ppRPA
         xy_sub = diagonalize_pprpa_triplet(nocc_sub, mo_energy_sub, Lpq_sub)[1]
 
-    if pprpa.multi == "s":
-        oo_dim = int((pprpa.nocc + 1) * pprpa.nocc / 2)
-        oo_dim_sub = int((nocc_sub + 1) * nocc_sub / 2)
-        vv_dim_sub = int((nvir_sub + 1) * nvir_sub / 2)
-    elif pprpa.multi == "t":
-        oo_dim = int((pprpa.nocc - 1) * pprpa.nocc / 2)
-        oo_dim_sub = int((nocc_sub - 1) * nocc_sub / 2)
-        vv_dim_sub = int((nvir_sub - 1) * nvir_sub / 2)
-
-    tri_vec = np.zeros(shape=[ntri, pprpa.full_dim], dtype=np.double)
-    tri_vec_sig = np.zeros(shape=[ntri], dtype=np.double)
-    start, end = oo_dim - oo_dim_sub, oo_dim + vv_dim_sub
+    tri_vec = np.zeros(shape=[ntri, pprpa.full_dim], dtype=xy_sub.dtype)
     if channel == "pp":
-        tri_vec[:, start:end] = xy_sub[oo_dim_sub : oo_dim_sub + ntri]
-        tri_vec_sig[:] = 1.0
+        xy_sub = xy_sub[oo_dim_sub: oo_dim_sub+ntri]
+        tri_vec_sig = np.ones(shape=[ntri], dtype=np.double)
     else:
-        tri_vec[:, start:end] = np.flip(xy_sub[oo_dim_sub-ntri:oo_dim_sub], axis=0)
-        tri_vec_sig[:] = -1.0
+        xy_sub = np.flip(xy_sub[oo_dim_sub-ntri:oo_dim_sub], axis=0)
+        tri_vec_sig = -np.ones(shape=[ntri], dtype=np.double)
+
+    tri_row_o, tri_col_o = np.tril_indices(pprpa.nocc, is_singlet-1)
+    tri_row_o_sub, tri_col_o_sub = np.tril_indices(nocc_sub, is_singlet-1)
+    tri_row_v, tri_col_v = np.tril_indices(pprpa.nvir, is_singlet-1)
+    tri_row_v_sub, tri_col_v_sub = np.tril_indices(nvir_sub, is_singlet-1)
+
+    full_oo = np.zeros(shape=[ntri, pprpa.nocc, pprpa.nocc], dtype=xy_sub.dtype)
+    full_vv = np.zeros(shape=[ntri, pprpa.nvir, pprpa.nvir], dtype=xy_sub.dtype)
+    sub_oo = np.zeros(shape=[ntri, nocc_sub, nocc_sub], dtype=xy_sub.dtype)
+    sub_vv = np.zeros(shape=[ntri, nvir_sub, nvir_sub], dtype=xy_sub.dtype)
+
+    # Expand subspace lower triangle xy
+    # Copy subspace xy to the correct positions in the full space xy
+    # Compute full space xy to lower triangle
+    sub_oo[:, tri_row_o_sub, tri_col_o_sub] = xy_sub[:, :oo_dim_sub]
+    sub_vv[:, tri_row_v_sub, tri_col_v_sub] = xy_sub[:, oo_dim_sub:]
+    full_oo[:, pprpa.nocc-nocc_sub:, pprpa.nocc-nocc_sub:] = sub_oo
+    full_vv[:, :nvir_sub, :nvir_sub] = sub_vv
+    tri_vec[:, :pprpa.oo_dim] = full_oo[:, tri_row_o, tri_col_o]
+    tri_vec[:, pprpa.oo_dim:] = full_vv[:, tri_row_v, tri_col_v]
+
     return tri_vec, tri_vec_sig
 
 
@@ -391,6 +367,109 @@ def _pprpa_contraction(pprpa, tri_vec):
     return mv_prod
 
 
+def _pprpa_subspace_diag(pprpa, ntri, tri_vec, tri_vec_sig, mv_prod):
+    """Diagonalize ppRPA matrix in the trial vector subspace.
+
+    Parameters
+    ----------
+    pprpa : ppRPA_Davidson
+        pprpa object
+    ntri : int
+        number of trial vectors
+    tri_vec : double or complex ndarray
+        trial vector
+    tri_vec_sig : double ndarray
+        signature of trial vectors
+    mv_prod : double or complex ndarray
+        product of ppRPA matrix and trial vector
+
+    Returns
+    -------
+    first_state : int
+        index of the first desired state
+    v_tri : double or complex ndarray
+        eigenvector in the trial vector subspace
+    """
+    data_type = tri_vec.dtype
+    # get ppRPA matrix and metric matrix in subspace
+    m_tilde = np.matmul(tri_vec[:ntri].conj(), mv_prod[:ntri].T)
+    w_tilde = np.zeros_like(m_tilde)
+    for i in range(ntri):
+        if inner_product(tri_vec[i].conj(), tri_vec[i], pprpa.oo_dim).real > 0:
+            w_tilde[i, i] = 1
+        else:
+            w_tilde[i, i] = -1
+
+    # diagonalize subspace matrix
+    if data_type == np.double:
+        alphar, _, beta, _, v_tri, _, _ = scipy.linalg.lapack.dggev(
+            m_tilde, w_tilde, compute_vl=0)
+    elif data_type == np.complex128:
+        alphar, beta, _, v_tri, _, _ = scipy.linalg.lapack.zggev(
+            m_tilde, w_tilde, compute_vl=0)
+    e_tri = (alphar / beta).real
+    v_tri = v_tri.T  # Fortran matrix to Python order
+
+    if pprpa.channel == "pp":
+        # sort eigenvalues and eigenvectors by ascending order
+        idx = e_tri.argsort()
+        e_tri = e_tri[idx]
+        v_tri = v_tri[idx, :]
+
+        # re-order all states by signs, first hh then pp
+        sig = np.zeros(shape=[ntri], dtype=int)
+        for i in range(ntri):
+            if np.sum(v_tri[i].conj() * tri_vec_sig[:ntri] * v_tri[i]).real > 0:
+                sig[i] = 1
+            else:
+                sig[i] = -1
+
+        hh_index = np.where(sig < 0)[0]
+        pp_index = np.where(sig > 0)[0]
+        e_tri_hh = e_tri[hh_index]
+        e_tri_pp = e_tri[pp_index]
+        e_tri[:len(hh_index)] = e_tri_hh
+        e_tri[len(hh_index):] = e_tri_pp
+        v_tri_hh = v_tri[hh_index]
+        v_tri_pp = v_tri[pp_index]
+        v_tri[:len(hh_index)] = v_tri_hh
+        v_tri[len(hh_index):] = v_tri_pp
+
+        # get only two-electron addition energy
+        first_state=len(hh_index)
+        pprpa.exci = e_tri[first_state:first_state+pprpa.nroot]
+    else:
+        # sort eigenvalues and eigenvectors by descending order
+        idx = e_tri.argsort()[::-1]
+        e_tri = e_tri[idx]
+        v_tri = v_tri[idx, :]
+
+        # re-order all states by signs, first pp then hh
+        sig = np.zeros(shape=[ntri], dtype=int)
+        for i in range(ntri):
+            if np.sum(v_tri[i].conj() * tri_vec_sig[:ntri] * v_tri[i]).real > 0:
+                sig[i] = 1
+            else:
+                sig[i] = -1
+
+        hh_index = np.where(sig < 0)[0]
+        pp_index = np.where(sig > 0)[0]
+        e_tri_hh = e_tri[hh_index]
+        e_tri_pp = e_tri[pp_index]
+        e_tri[:len(pp_index)] = e_tri_pp
+        e_tri[len(pp_index):] = e_tri_hh
+        v_tri_hh = v_tri[hh_index]
+        v_tri_pp = v_tri[pp_index]
+        v_tri[:len(pp_index)] = v_tri_pp
+        v_tri[len(pp_index):] = v_tri_hh
+
+        # get only two-electron removal energy
+        first_state=len(pp_index)
+        pprpa.exci = e_tri[first_state:first_state+pprpa.nroot]
+
+    return first_state, v_tri
+
+
 def _pprpa_expand_space(
         pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri):
     """Expand trial vector space in Davidson algorithm.
@@ -419,7 +498,7 @@ def _pprpa_expand_space(
     tri_row_o, tri_col_o = np.tril_indices(nocc, is_singlet-1)
     tri_row_v, tri_col_v = np.tril_indices(nvir, is_singlet-1)
 
-    # take only nRoot vectors, starting from first pp channel
+    # take only nRoot vectors, starting from first pp/hh channel
     tmp = v_tri[first_state:(first_state+nroot)]
 
     # get the eigenvectors in the original space
@@ -463,7 +542,7 @@ def _pprpa_expand_space(
 
         for ivec in range(ntri):
             # compute product between new vector and old vector
-            inp = -inner_product(residue[iroot], tri_vec[ivec], pprpa.oo_dim)
+            inp = -inner_product(residue[iroot], tri_vec[ivec].conj(), pprpa.oo_dim)
             # eliminate parallel part
             if tri_vec_sig[ivec] < 0:
                 inp = -inp
@@ -471,10 +550,9 @@ def _pprpa_expand_space(
 
         # add a new trial vector
         if len(residue[iroot][abs(residue[iroot]) > residue_thresh]) > 0:
-            assert ntri < max_vec, (
-                "ppRPA Davidson expansion failed! ntri %d exceeds max_vec %d!" %
-                (ntri, max_vec))
-            inp = inner_product(residue[iroot], residue[iroot], pprpa.oo_dim)
+            if pprpa._compact_subspace is False:
+                assert ntri < max_vec, "Davidson expansion failed!"
+            inp = inner_product(residue[iroot].conj(), residue[iroot], pprpa.oo_dim).real
             tri_vec_sig[ntri] = 1 if inp > 0 else -1
             tri_vec[ntri] = residue[iroot] / np.sqrt(abs(inp))
             ntri = ntri + 1
@@ -482,6 +560,62 @@ def _pprpa_expand_space(
     conv = True if ntri_old == ntri else False
     return conv, ntri
 
+
+def _pprpa_compact_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri):
+    """Generate new trial vectors from non-converged eigenvectors.
+
+    Parameters
+    ----------
+    pprpa : ppRPA_Davidson
+        ppRPA object
+    first_state : int
+        index of the first desired state
+    tri_vec : double or complex ndarray
+        trial vector, will be overwritten
+    tri_vec_sig : double ndarray
+        signature of trial vectors, will be overwritten
+    mv_prod : double or complex ndarray
+        product of ppRPA matrix and trial vector, will be overwritten
+    v_tri : double or complex ndarray
+        eigenvector in the trial vector subspace
+
+    Returns
+    -------
+    ntri : ntri
+        number of trail vectors
+    """
+    print("Compacting subspace...")
+    if pprpa.channel == "pp":
+        ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
+    else:
+        ntri = min(pprpa.nroot * 4, pprpa.oo_dim)
+    ntri_old = v_tri.shape[0]
+
+    # recombines trial vector for the "best" ntri subspace vectors
+    # v_tri is the coefficient from old to new trial space
+    tmp = v_tri[first_state:(first_state+ntri)]
+    tri_vec[:ntri] = np.matmul(tmp, tri_vec[:ntri_old])
+    mv_prod[:ntri] = np.matmul(tmp, mv_prod[:ntri_old])
+
+    tri_vec_sig[:ntri] = np.zeros(shape=[ntri], dtype=np.double)
+    for i in range(ntri):
+        if inner_product(tri_vec[i].conj(), tri_vec[i], pprpa.oo_dim).real > 0:
+            tri_vec_sig[i] = 1
+        else:
+            tri_vec_sig[i] = -1
+
+    # orthonormalize
+    for i in range(ntri):
+        for j in range(i):
+            norm_j = inner_product(tri_vec[j].conj(), tri_vec[j], pprpa.oo_dim).real
+            inp = inner_product(tri_vec[j].conj(), tri_vec[i], pprpa.oo_dim) / norm_j
+            tri_vec[i] -= tri_vec[j] * inp
+            mv_prod[i] -= mv_prod[j] * inp
+        inp = inner_product(tri_vec[i].conj(), tri_vec[i], pprpa.oo_dim).real
+        tri_vec[i] /= np.sqrt(abs(inp))
+        mv_prod[i] /= np.sqrt(abs(inp))
+
+    return ntri
 
 # analysis functions
 def _pprpa_print_eigenvector(
@@ -514,7 +648,7 @@ def _pprpa_print_eigenvector(
     au2ev = 27.211386
     if channel == "pp":
         for iroot in range(nroot):
-            print("#%-d %s excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+            print("#%-d %s excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
                   (iroot + 1, multi,
                    (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
             if nocc > 0:
@@ -536,7 +670,7 @@ def _pprpa_print_eigenvector(
             print("")
     else:
         for iroot in range(nroot):
-            print("#%-d %s de-excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+            print("#%-d %s de-excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
                   (iroot + 1, multi,
                    (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
             full = np.zeros(shape=[nocc, nocc], dtype=np.double)
@@ -591,7 +725,7 @@ def _analyze_pprpa_davidson(
 
 class ppRPA_Davidson():
     def __init__(
-            self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=200,
+            self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=500,
             max_iter=100, trial="identity", residue_thresh=1.0e-7,
             print_thresh=0.1):
         # necessary input
@@ -613,6 +747,7 @@ class ppRPA_Davidson():
         self.nvir_sub = 40  # number of virtual orbitals in the trial vector subspace
         self.residue_thresh = residue_thresh  # residue threshold
         self.print_thresh = print_thresh  # threshold to print component
+        self._compact_subspace = False  # compact large subspace
 
         # internal flags
         self.multi = None  # multiplicity
@@ -682,6 +817,7 @@ class ppRPA_Davidson():
         print('print threshold = %.2f%%' % (self.print_thresh*100))
         # experiment features
         print("_use_Lov = %s" % self._use_Lov)
+        print("_compact_subspace = %s" % self._compact_subspace)
         print('')
         return
 
@@ -753,3 +889,6 @@ class ppRPA_Davidson():
             xy_t=self.xy_t, nocc=self.nocc, nvir=self.nvir,
             print_thresh=self.print_thresh, channel=self.channel)
         return
+
+    def contraction(self, tri_vec):
+        return _pprpa_contraction(self, tri_vec)

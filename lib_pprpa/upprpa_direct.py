@@ -32,18 +32,19 @@ def upprpa_orthonormalize_eigenvector(subspace, nocc, exci, xy):
         # determine the vector is pp or hh
         sig = numpy.zeros(shape=[nroot], dtype=numpy.double)
         for i in range(nroot):
-            sig[i] = 1 if inner_product(xy[i], xy[i], oo_dim) > 0 else -1
+            sig[i] = 1 if inner_product(xy[i].conj(), xy[i], oo_dim) > 0 else -1
 
         # eliminate parallel component
         for i in range(nroot):
             for j in range(i):
                 if abs(exci[i] - exci[j]) < 1.0e-7:
-                    inp = inner_product(xy[i], xy[j], oo_dim)
-                    xy[i] -= sig[j] * xy[j] * inp
+                    norm_j = inner_product(xy[j].conj(), xy[j], oo_dim)
+                    inp = inner_product(xy[i].conj(), xy[j], oo_dim)/ norm_j
+                    xy[i] -= xy[j] * inp
 
         # normalize
         for i in range(nroot):
-            inp = inner_product(xy[i], xy[i], oo_dim)
+            inp = inner_product(xy[i].conj(), xy[i], oo_dim)
             inp = numpy.sqrt(abs(inp))
             xy[i] /= inp
 
@@ -204,7 +205,7 @@ def _pprpa_print_eigenvector(subspace, nocc, nvir, nocc_fro, thresh, hh_state,
 
     # =====================> two-electron removal <======================
     for istate in range(min(hh_state, oo_dim)):
-        print("#%-d %s de-excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+        print("#%-d %s de-excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, subspace[:2], (exci[oo_dim-istate-1] - exci0) * au2ev,
                exci[oo_dim-istate-1] * au2ev))
         if subspace == 'aaaa' or subspace == 'bbbb':
@@ -242,7 +243,7 @@ def _pprpa_print_eigenvector(subspace, nocc, nvir, nocc_fro, thresh, hh_state,
 
     # =====================> two-electron addition <=====================
     for istate in range(min(pp_state, vv_dim)):
-        print("#%-d %s excitation:  exci= %-12.4f  eV   2e=  %-12.4f  eV" %
+        print("#%-d %s excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, subspace[:2], (exci[oo_dim+istate] - exci0) * au2ev,
                exci[oo_dim+istate] * au2ev))
         if subspace == 'aaaa' or subspace == 'bbbb':
