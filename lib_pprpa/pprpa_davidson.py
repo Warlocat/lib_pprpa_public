@@ -17,7 +17,7 @@ def kernel(pprpa):
     else:
         data_type = pprpa.Lpq.dtype
     # the maximum size is max_vec + nroot for compacting
-    tri_size = pprpa.max_vec + pprpa.nroot 
+    tri_size = pprpa.max_vec + pprpa.nroot
     tri_vec = np.zeros(
         shape=[tri_size, pprpa.full_dim], dtype=data_type)
     tri_vec_sig = np.zeros(shape=[tri_size], dtype=data_type)
@@ -42,8 +42,7 @@ def kernel(pprpa):
         print(
             "\nppRPA Davidson %d-th iteration, ntri= %d , nprod= %d ." %
             (iter + 1, ntri, nprod), flush=True)
-        mv_prod[nprod:ntri] = pprpa.contraction(
-            tri_vec=tri_vec[nprod:ntri])
+        mv_prod[nprod:ntri] = pprpa.contraction(tri_vec=tri_vec[nprod:ntri])
         nprod = ntri
 
         first_state, v_tri = _pprpa_subspace_diag(
@@ -51,7 +50,7 @@ def kernel(pprpa):
             tri_vec_sig=tri_vec_sig, mv_prod=mv_prod)
 
         # If the subspace is too large, compact the subspace
-        if ntri > pprpa.max_vec:
+        if ntri > pprpa.max_vec and pprpa._compact_subspace is True:
             ntri = _pprpa_compact_space(
             pprpa=pprpa, first_state=first_state, tri_vec=tri_vec,
             tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
@@ -218,12 +217,10 @@ def get_subspace_trial_vector(pprpa, ntri, channel=None, nocc_sub=40, nvir_sub=4
     nocc_sub = min(pprpa.nocc, nocc_sub)
     nvir_sub = min(pprpa.nvir, nvir_sub)
     if pprpa.multi == "s":
-        oo_dim = int((pprpa.nocc + 1) * pprpa.nocc / 2)
         oo_dim_sub = int((nocc_sub + 1) * nocc_sub / 2)
         vv_dim_sub = int((nvir_sub + 1) * nvir_sub / 2)
         is_singlet = 1
     elif pprpa.multi == "t":
-        oo_dim = int((pprpa.nocc - 1) * pprpa.nocc / 2)
         oo_dim_sub = int((nocc_sub - 1) * nocc_sub / 2)
         vv_dim_sub = int((nvir_sub - 1) * nvir_sub / 2)
         is_singlet = 0
@@ -369,7 +366,30 @@ def _pprpa_contraction(pprpa, tri_vec):
 
     return mv_prod
 
+
 def _pprpa_subspace_diag(pprpa, ntri, tri_vec, tri_vec_sig, mv_prod):
+    """Diagonalize ppRPA matrix in the trial vector subspace.
+
+    Parameters
+    ----------
+    pprpa : ppRPA_Davidson
+        pprpa object
+    ntri : int
+        number of trial vectors
+    tri_vec : double or complex ndarray
+        trial vector
+    tri_vec_sig : double ndarray
+        signature of trial vectors
+    mv_prod : double or complex ndarray
+        product of ppRPA matrix and trial vector
+
+    Returns
+    -------
+    first_state : int
+        index of the first desired state
+    v_tri : double or complex ndarray
+        eigenvector in the trial vector subspace
+    """
     data_type = tri_vec.dtype
     # get ppRPA matrix and metric matrix in subspace
     m_tilde = np.matmul(tri_vec[:ntri].conj(), mv_prod[:ntri].T)
@@ -446,7 +466,7 @@ def _pprpa_subspace_diag(pprpa, ntri, tri_vec, tri_vec_sig, mv_prod):
         # get only two-electron removal energy
         first_state=len(pp_index)
         pprpa.exci = e_tri[first_state:first_state+pprpa.nroot]
-    
+
     return first_state, v_tri
 
 
@@ -530,6 +550,8 @@ def _pprpa_expand_space(
 
         # add a new trial vector
         if len(residue[iroot][abs(residue[iroot]) > residue_thresh]) > 0:
+            if pprpa._compact_subspace is False:
+                assert ntri < max_vec, "Davidson expansion failed!"
             inp = inner_product(residue[iroot].conj(), residue[iroot], pprpa.oo_dim).real
             tri_vec_sig[ntri] = 1 if inp > 0 else -1
             tri_vec[ntri] = residue[iroot] / np.sqrt(abs(inp))
@@ -538,33 +560,61 @@ def _pprpa_expand_space(
     conv = True if ntri_old == ntri else False
     return conv, ntri
 
+
 def _pprpa_compact_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tri):
+    """Generate new trial vectors from non-converged eigenvectors.
+
+    Parameters
+    ----------
+    pprpa : ppRPA_Davidson
+        ppRPA object
+    first_state : int
+        index of the first desired state
+    tri_vec : double or complex ndarray
+        trial vector, will be overwritten
+    tri_vec_sig : double ndarray
+        signature of trial vectors, will be overwritten
+    mv_prod : double or complex ndarray
+        product of ppRPA matrix and trial vector, will be overwritten
+    v_tri : double or complex ndarray
+        eigenvector in the trial vector subspace
+
+    Returns
+    -------
+    ntri : ntri
+        number of trail vectors
+    """
     print("Compacting subspace...")
     if pprpa.channel == "pp":
         ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
     else:
         ntri = min(pprpa.nroot * 4, pprpa.oo_dim)
     ntri_old = v_tri.shape[0]
-    
-    # The "best" ntri subspace vectors
+
+    # recombines trial vector for the "best" ntri subspace vectors
+    # v_tri is the coefficient from old to new trial space
     tmp = v_tri[first_state:(first_state+ntri)]
     tri_vec[:ntri] = np.matmul(tmp, tri_vec[:ntri_old])
     mv_prod[:ntri] = np.matmul(tmp, mv_prod[:ntri_old])
 
     tri_vec_sig[:ntri] = np.zeros(shape=[ntri], dtype=np.double)
     for i in range(ntri):
-        tri_vec_sig[i] = 1 if inner_product(tri_vec[i].conj(), tri_vec[i], pprpa.oo_dim).real > 0 else -1
+        if inner_product(tri_vec[i].conj(), tri_vec[i], pprpa.oo_dim).real > 0:
+            tri_vec_sig[i] = 1
+        else:
+            tri_vec_sig[i] = -1
+
     # orthonormalize
     for i in range(ntri):
         for j in range(i):
-            inp = inner_product(tri_vec[j].conj(), tri_vec[i], pprpa.oo_dim) / inner_product(tri_vec[j].conj(), tri_vec[j], pprpa.oo_dim).real
+            norm_j = inner_product(tri_vec[j].conj(), tri_vec[j], pprpa.oo_dim).real
+            inp = inner_product(tri_vec[j].conj(), tri_vec[i], pprpa.oo_dim) / norm_j
             tri_vec[i] -= tri_vec[j] * inp
             mv_prod[i] -= mv_prod[j] * inp
         inp = inner_product(tri_vec[i].conj(), tri_vec[i], pprpa.oo_dim).real
         tri_vec[i] /= np.sqrt(abs(inp))
         mv_prod[i] /= np.sqrt(abs(inp))
-    
-    
+
     return ntri
 
 # analysis functions
@@ -675,7 +725,7 @@ def _analyze_pprpa_davidson(
 
 class ppRPA_Davidson():
     def __init__(
-            self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=400,
+            self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=500,
             max_iter=100, trial="identity", residue_thresh=1.0e-7,
             print_thresh=0.1):
         # necessary input
@@ -697,6 +747,7 @@ class ppRPA_Davidson():
         self.nvir_sub = 40  # number of virtual orbitals in the trial vector subspace
         self.residue_thresh = residue_thresh  # residue threshold
         self.print_thresh = print_thresh  # threshold to print component
+        self._compact_subspace = False  # compact large subspace
 
         # internal flags
         self.multi = None  # multiplicity
@@ -766,6 +817,7 @@ class ppRPA_Davidson():
         print('print threshold = %.2f%%' % (self.print_thresh*100))
         # experiment features
         print("_use_Lov = %s" % self._use_Lov)
+        print("_compact_subspace = %s" % self._compact_subspace)
         print('')
         return
 
