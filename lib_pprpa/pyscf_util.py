@@ -873,6 +873,7 @@ def get_fxc_r(mf):
             w_rho = numpy.einsum('rpq,r->rpq', rho_value, wfxc, optimize=True)
             w = numpy.einsum(
                 'rpq,rmn->pqmn', rho_value, w_rho, optimize=True) * 2
+            fxc_mat += w
 
     elif xctype == 'GGA':
         ao_deriv = 1
@@ -889,8 +890,136 @@ def get_fxc_r(mf):
             w_rho = numpy.einsum(
                 'xyr,xrpq->yrpq', wfxc, rho_value, optimize=True)
             w = numpy.einsum('xrpq,xrmn->pqmn', w_rho, rho_value, optimize=True)
+            fxc_mat += w
 
     elif xctype == 'MGGA':
         raise NotImplementedError
 
     return fxc_mat
+
+
+def get_fxc_u(mf, nocc_act=None, nvir_act=None):
+    """Calculate fxc matrices in orbital space.
+
+    Args:
+        mf (pyscf.dft.UKS): pyscf unrestricted KS-DFT object.
+
+    Returns:
+        fxc_mat (list of numpy.ndarray): fxc matrices in orbital space,
+            (aaaa, bbbb, aabb). bbaa = aabb.transpose(2, 3, 0, 1).
+    """
+    import pyscf
+    start_clock("getting fxc for molecule UppRPAw from PySCF")
+    mo = mf.mo_coeff
+    moa = mo[0]
+    mob = mo[1]
+    nao, nmo = mo[0].shape
+    nocc = mf.nelec
+    nvir = (nmo - nocc[0], nmo - nocc[1])
+    mo_occ = mf.mo_occ
+    if nocc_act is None:
+        nocc_act = nocc
+    elif isinstance(nocc_act, (int, numpy.int64)):
+        nocc_act = [nocc_act, nocc_act]
+        nocc_act = (min(nocc[0], nocc_act[0]), min(nocc[1], nocc_act[1]))
+    else:
+        nocc_act = (min(nocc[0], nocc_act[0]), min(nocc[1], nocc_act[1]))
+
+    if nvir_act is None:
+        nvir_act = nvir
+    elif isinstance(nvir_act, (int, numpy.int64)):
+        nvir_act = [nvir_act, nvir_act]
+        nvir_act = (min(nvir[0], nvir_act[0]), min(nvir[1], nvir_act[1]))
+    else:
+        nvir_act = (min(nvir[0], nvir_act[0]), min(nvir[1], nvir_act[1]))
+
+    nact = (nocc_act[0] + nvir_act[0], nocc_act[1] + nvir_act[1])
+
+    dm0 = mf.make_rdm1(mo, mo_occ)
+    ni = mf._numint
+    make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=1, with_lapl=False)[0]
+    mem_now = pyscf.lib.current_memory()[0]
+    max_memory = max(2000, mf.max_memory*.8-mem_now)
+    xctype = ni._xc_type(mf.xc)
+
+    fxcaa_mat = numpy.zeros((nact[0], nact[0], nact[0], nact[0]))
+    fxcab_mat = numpy.zeros((nact[0], nact[0], nact[1], nact[1]))
+    fxcbb_mat = numpy.zeros((nact[1], nact[1], nact[1], nact[1]))
+    if xctype == 'LDA':
+        ao_deriv = 0
+        for ao, mask, weight, coords \
+                in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
+            rho0a = make_rho(0, ao, mask, xctype)
+            rho0b = make_rho(1, ao, mask, xctype)
+            rho = (rho0a, rho0b)
+            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+            wfxc = fxc[:, 0, :, 0] * weight
+
+            moa_r = numpy.einsum('ka,ap->kp', ao, moa[:, \
+                (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])], optimize=True)
+            mob_r = numpy.einsum('ka,ap->kp', ao, mob[:, \
+                (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])], optimize=True)
+            rhoa_r = numpy.einsum('kp,kq->kpq', moa_r, moa_r, optimize=True)
+            rhob_r = numpy.einsum('kp,kq->kpq', mob_r, mob_r, optimize=True)
+
+            # aaaa
+            f_rs = numpy.einsum('krs,k->krs', rhoa_r, wfxc[0, 0], optimize=True)
+            pqrs = numpy.einsum('kpq,krs->pqrs', rhoa_r, f_rs, optimize=True)
+            fxcaa_mat += pqrs
+
+            # aabb
+            f_rs = numpy.einsum('krs,k->krs', rhob_r, wfxc[0, 1], optimize=True)
+            pqrs = numpy.einsum('kpq,krs->pqrs', rhoa_r, f_rs, optimize=True)
+            fxcab_mat += pqrs
+
+            # bbbb
+            f_rs = numpy.einsum('krs,k->krs', rhob_r, wfxc[1, 1], optimize=True)
+            pqrs = numpy.einsum('kpq,krs->pqrs', rhob_r, f_rs, optimize=True)
+            fxcbb_mat += pqrs
+
+    elif xctype == 'GGA':
+        ao_deriv = 1
+        for ao, mask, weight, coords \
+                in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
+            rho0a = make_rho(0, ao, mask, xctype)
+            rho0b = make_rho(1, ao, mask, xctype)
+            rho = (rho0a, rho0b)
+            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
+            wfxc = fxc * weight
+
+            moa_r = numpy.einsum('xka,ap->xkp', ao, moa[:, \
+                (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])], optimize=True)
+            mob_r = numpy.einsum('xka,ap->xkp', ao, mob[:, \
+                (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])], optimize=True)
+            rhoa_r = numpy.einsum('xkp,kq->xkpq', moa_r, moa_r[0], 
+                                  optimize=True)
+            rhob_r = numpy.einsum('xkp,kq->xkpq', mob_r, mob_r[0], 
+                                  optimize=True)
+            rhoa_r[1:4] += numpy.einsum('kp,xkq->xkpq', moa_r[0], moa_r[1:4], 
+                                        optimize=True)
+            rhob_r[1:4] += numpy.einsum('kp,xkq->xkpq', mob_r[0], mob_r[1:4], 
+                                        optimize=True)
+
+            # aaaa
+            f_rs = numpy.einsum('xyk,xkrs->ykrs', wfxc[0, :, 0], rhoa_r, 
+                                optimize=True)
+            pqrs = numpy.einsum('ykpq,ykrs->pqrs', rhoa_r, f_rs, optimize=True)
+            fxcaa_mat += pqrs
+
+            # aabb
+            f_rs = numpy.einsum('xyk,xkrs->ykrs', wfxc[0, :, 1], rhob_r, 
+                                optimize=True)
+            pqrs = numpy.einsum('ykpq,ykrs->pqrs', rhoa_r, f_rs, optimize=True)
+            fxcab_mat += pqrs
+
+            # aabb
+            f_rs = numpy.einsum('xyk,xkrs->ykrs', wfxc[1, :, 1], rhob_r, 
+                                optimize=True)
+            pqrs = numpy.einsum('ykpq,ykrs->pqrs', rhob_r, f_rs, optimize=True)
+            fxcbb_mat += pqrs
+
+    else:
+        raise NotImplementedError
+
+    stop_clock("getting fxc for molecule UppRPAw from PySCF")
+    return fxcaa_mat, fxcbb_mat, fxcab_mat
