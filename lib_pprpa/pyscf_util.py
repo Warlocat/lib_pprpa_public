@@ -99,9 +99,18 @@ def get_pyscf_input_mol_r(
 
     naux = mf.with_df.get_naoaux()
     ijslice = (nocc-nocc_act, nocc+nvir_act, nocc-nocc_act, nocc+nvir_act)
-    Lpq = None
-    Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff, ijslice, aosym='s2', out=Lpq)
-    Lpq = Lpq.reshape(naux, nmo_act, nmo_act)
+    try:
+        Lpq = None
+        Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff, ijslice, aosym='s2', out=Lpq)
+        Lpq = Lpq.reshape(naux, nmo_act, nmo_act)
+    except AttributeError:
+        # Chunking if filename passed as _cderi.
+        Lpq = []
+        for LpqR in mf.with_df.loop():
+            tmp = None
+            tmp = _ao2mo.nr_e2(LpqR, mo_coeff, ijslice, aosym='s2', out=tmp)
+            Lpq.append(tmp)
+        Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
 
     if dump_file is not None:
         f = h5py.File(name="%s.h5" % dump_file, mode="w")
@@ -112,8 +121,7 @@ def get_pyscf_input_mol_r(
 
     print("\nget input for lib_pprpa from PySCF (molecule)")
     print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
-    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" %
-          (nmo_act, nocc_act, nvir_act))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" % (nmo_act, nocc_act, nvir_act))
     print("naux = %-d" % naux)
     print("dump h5py file = %-s" % dump_file)
 
