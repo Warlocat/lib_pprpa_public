@@ -103,7 +103,7 @@ def get_pyscf_input_mol_r(
         Lpq = None
         Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff, ijslice, aosym='s2', out=Lpq)
         Lpq = Lpq.reshape(naux, nmo_act, nmo_act)
-    except:
+    except AttributeError:
         # Chunking if filename passed as _cderi.
         Lpq = []
         for LpqR in mf.with_df.loop():
