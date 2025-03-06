@@ -143,6 +143,100 @@ A package for particle-particle random phase approximation.
     return
 
 
+def GMRES_Pople(AMultX, ADiag, B, maxIter = 30, tol = 1e-14, printLevel = 0):
+    """ Solve AX = B using Pople's algorithm. 
+        It is designed for solving Z-vector equations for orbital relaxation. 
+        Poples's algorithm is highly related to the GMRES/Krylov-space methods.
+        But interestingly, Pople's paper is earlier than the GMRES algorithm.
+        (https://doi.org/10.1002/qua.560160825)
+        
+        A = ADiag*[I - Ap], Ap = I - ADiagInv*A, Bp = ADiagInv*B
+        Ap*X = X - ADiagInv*A*X
+        [I - Ap] X = Bp
+        X = span[Bp, Ap*Bp, Ap^2*Bp, ...]
+          = span[Bp, ADiagInv*A*Bp, ADiagInv*A^2*Bp, ...]
+
+        ADiag is just for preconditioning. It is not necessary to 
+        be the exact diagonal elements of A.
+    Args:
+        AMultX (function): A function to multiply A with X.
+        ADiag (double/complex array): Diagonal elements of A.
+        B (double/complex array): Right-hand side of the equation.
+        maxIter (int): Maximum number of iterations.
+        tol (float): Tolerance for convergence.
+        printLevel (int): Print level.
+    Returns:
+        X (double/complex array): Solution of the equation.
+    """
+    size = B.shape[0]
+    assert size == len(ADiag)
+    maxIter = min(maxIter, size + 1)
+
+    Bp = B.copy()/numpy.sqrt(numpy.dot(B.conj().T, B).real)
+    for ii in range(size):
+        Bp[ii] = B[ii]/ADiag[ii]
+
+    X_list = [Bp]
+    AX_list = []
+    converged = False
+    for ii in range(1, maxIter):
+        AX = AMultX(X_list[ii-1])
+        for jj in range(size):
+            AX[jj] = AX[jj]/ADiag[jj]
+        AX_list.append(AX)
+        for jj in range(ii):
+            Xnorm = numpy.dot(X_list[jj].conj().T, X_list[jj])
+            AX = AX - numpy.dot(X_list[jj].conj().T, AX)/Xnorm * X_list[jj]
+        AXnorm = numpy.sqrt(numpy.dot(AX.conj().T, AX).real)/size
+        if printLevel >= 1:
+            print("gmres iter %d, residual norm: %e" % (ii, AXnorm))
+        if AXnorm < tol:
+            converged = True
+            break
+        else:
+            X_list.append(AX)
+    if not converged:
+        print("ERROR: GMRES (Pople) did not converge in %d iterations!" % maxIter)
+        exit()
+
+    nbasis = len(X_list)
+    A_sub = numpy.zeros((nbasis, nbasis), dtype = B.dtype)
+    B_sub = numpy.zeros((nbasis), dtype = B.dtype)
+    for ii in range(nbasis):
+        B_sub[ii] = numpy.dot(X_list[ii].conj().T, Bp)
+        for jj in range(nbasis):
+            A_sub[ii,jj] = numpy.dot(X_list[ii].conj().T, AX_list[jj])
+    X_sub = numpy.linalg.solve(A_sub, B_sub)
+    X = numpy.zeros((size), dtype = B.dtype)
+    for ii in range(nbasis):
+        X = X + X_sub[ii]*X_list[ii]
+    if printLevel >= 1:
+        print("gmres residual subspace: ", numpy.linalg.norm(A_sub.dot(X_sub) - B_sub))
+        print("gmres residual: ", numpy.linalg.norm(AMultX(X) - B))
+    return X
+
+def GMRES_wrapper(AMultX, ADiag, B, maxIter = 30, tol = 1e-14):
+    """ Solve AX = B using GMRES algorithm. 
+        It is a wrapper of the scipy.sparse.linalg.gmres function.
+    Args:
+        AMultX (function): A function to multiply A with X.
+        B (double/complex array): Right-hand side of the equation.
+        maxIter (int): Maximum number of iterations.
+        tol (float): Tolerance for convergence.
+        printLevel (int): Print level.
+    Returns:
+        X (double/complex array): Solution of the equation.
+    """
+    from scipy.sparse.linalg import gmres, LinearOperator
+    size = B.shape[0]
+    A = LinearOperator((size, size), matvec = AMultX, dtype=B.dtype)
+    M = numpy.diag(1.0/ADiag)
+    X, info = gmres(A, B, M = M, maxiter = maxIter, tol = tol)
+    if info != 0:
+        print("ERROR: GMRES did not converge!")
+        exit()
+    return X
+
 # time counting global variables and functions
 clock_names = []
 clocks = []
