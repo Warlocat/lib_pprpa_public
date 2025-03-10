@@ -299,37 +299,33 @@ def _pprpa_contraction(pprpa, tri_vec):
     tri_row_o, tri_col_o = np.tril_indices(nocc, is_singlet - 1)
     tri_row_v, tri_col_v = np.tril_indices(nvir, is_singlet - 1)
 
+    z_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
+    z_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
+
     for ivec in range(ntri):
         # restore trial vector into full matrix
-        z_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
         z_oo[tri_row_o, tri_col_o] = tri_vec[ivec][: pprpa.oo_dim]
         z_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
-        z_oo = np.ascontiguousarray(z_oo.T)
-        z_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
         z_vv[tri_row_v, tri_col_v] = tri_vec[ivec][pprpa.oo_dim :]
         z_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
-        z_vv = np.ascontiguousarray(z_vv.T)
 
         # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
         Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
         if pprpa._use_Lov is True:
-            Lpq_z[:, :nocc] = np.matmul(Lpi.reshape(naux * nmo, nocc), z_oo)
-            Lpq_z[:, nocc:] = np.matmul(Lpa.reshape(naux * nmo, nvir), z_vv)
+            Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
+            Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
         else:
-            Lpq_z[:, :nocc] = np.matmul(
-                Lpq[:, :, :nocc].reshape(naux * nmo, nocc), z_oo)
-            Lpq_z[:, nocc:] = np.matmul(
-                Lpq[:, :, nocc:].reshape(naux * nmo, nvir), z_vv)
+            Lpq_z[:, :nocc] = Lpq[:, :, :nocc].reshape(naux * nmo, nocc) @ z_oo
+            Lpq_z[:, nocc:] = Lpq[:, :, nocc:].reshape(naux * nmo, nvir) @ z_vv
 
         # transpose and reshape for faster multiplication
         Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
         Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
         # NOTE: here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
         if pprpa._use_Lov is True:
-            prod_oo = np.matmul(Lpq_z[:nocc], Lpi.reshape(naux * nmo, nocc))
+            prod_oo = Lpq_z[:nocc] @ Lpi.reshape(naux * nmo, nocc)
         else:
-            prod_oo = np.matmul(
-                Lpq_z[:nocc], Lpq[:, :, :nocc].reshape(naux * nmo, nocc))
+            prod_oo = Lpq_z[:nocc] @ Lpq[:, :, :nocc].reshape(naux * nmo, nocc)
         if pprpa.multi == "s":
             prod_oo += prod_oo.T
         else:
@@ -339,10 +335,9 @@ def _pprpa_contraction(pprpa, tri_vec):
         prod_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
 
         if pprpa._use_Lov is True:
-            prod_vv = np.matmul(Lpq_z[nocc:], Lpa.reshape(naux * nmo, nvir))
+            prod_vv = Lpq_z[nocc:] @ Lpa.reshape(naux * nmo, nvir)
         else:
-            prod_vv = np.matmul(
-                Lpq_z[nocc:], Lpq[:, :, nocc:].reshape(naux * nmo, nvir))
+            prod_vv = Lpq_z[nocc:] @ Lpq[:, :, nocc:].reshape(naux * nmo, nvir)
         if pprpa.multi == "s":
             prod_vv += prod_vv.T
         else:
@@ -355,9 +350,9 @@ def _pprpa_contraction(pprpa, tri_vec):
         mv_prod[ivec][pprpa.oo_dim :] = prod_vv[tri_row_v, tri_col_v]
 
     # orbital energy contribution
-    orb_sum_oo = np.array(mo_energy[None, :nocc] + mo_energy[:nocc, None])
+    orb_sum_oo = mo_energy[None, :nocc] + mo_energy[:nocc, None]
     orb_sum_oo = orb_sum_oo[tri_row_o, tri_col_o]
-    orb_sum_vv = np.array(mo_energy[None, nocc:] + mo_energy[nocc:, None])
+    orb_sum_vv = mo_energy[None, nocc:] + mo_energy[nocc:, None]
     orb_sum_vv = orb_sum_vv[tri_row_v, tri_col_v]
     orb_sum = np.concatenate((orb_sum_oo, orb_sum_vv)) - 2.0 * pprpa.mu
     # hole-hole block has a factor -1
@@ -523,11 +518,9 @@ def _pprpa_expand_space(
     if nconv == nroot:
         return True, ntri
 
-    orb_sum_oo = np.asarray(
-        mo_energy[None, : nocc] + mo_energy[: nocc, None]) - 2.0 * pprpa.mu
+    orb_sum_oo = mo_energy[None, : nocc] + mo_energy[: nocc, None] - 2.0 * pprpa.mu
     orb_sum_oo = orb_sum_oo[tri_row_o, tri_col_o]
-    orb_sum_vv = np.asarray(
-        mo_energy[None, nocc:] + mo_energy[nocc:, None]) - 2.0 * pprpa.mu
+    orb_sum_vv = mo_energy[None, nocc:] + mo_energy[nocc:, None] - 2.0 * pprpa.mu
     orb_sum_vv = orb_sum_vv[tri_row_v, tri_col_v]
 
     # Schmidt orthogonalization
