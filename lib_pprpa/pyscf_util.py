@@ -1,5 +1,11 @@
 import h5py
+import math
 import numpy
+import scipy
+import scipy.linalg
+
+from pyscf import ao2mo
+from pyscf.lib import unpack_tril
 
 from lib_pprpa.analyze import get_pprpa_nto, get_pprpa_dm
 from lib_pprpa.pprpa_util import start_clock, stop_clock, get_nocc_nvir_frac
@@ -8,7 +14,7 @@ from lib_pprpa.pprpa_util import start_clock, stop_clock, get_nocc_nvir_frac
 # get input from PySCF
 def get_pyscf_input_mol(
         mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
-        sort_mo=False):
+        sort_mo=False, cholesky=False):
     import pyscf
 
     if isinstance(mf, pyscf.scf.uhf.UHF) or isinstance(mf, pyscf.dft.uks.UKS):
@@ -28,8 +34,8 @@ def get_pyscf_input_mol(
     if isinstance(mf, pyscf.scf.rhf.RHF) or isinstance(mf, pyscf.dft.rks.RKS):
         return get_pyscf_input_mol_r(
             mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
-            dump_file=dump_file, sort_mo=sort_mo)
-    
+            dump_file=dump_file, sort_mo=sort_mo, cholesky=cholesky)
+
     if isinstance(mf, pyscf.scf.ghf.GHF) or isinstance(mf, pyscf.dft.gks.GKS):
         return get_pyscf_input_mol_g(
             mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
@@ -38,7 +44,7 @@ def get_pyscf_input_mol(
 
 def get_pyscf_input_mol_r(
         mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
-        sort_mo=False):
+        sort_mo=False, cholesky=False):
     """Get ppRPA input from a PySCF molecular SCF calculation.
 
     Args:
@@ -47,6 +53,7 @@ def get_pyscf_input_mol_r(
         nocc_act (int, optional): number of active occupied orbitals. Defaults to None.
         nvir_act (int, optional): number of active virtual orbitals. Defaults to None.
         dump_file (str, optional): file name to dump matrix for lib_pprpa. Defaults to None.
+        cholesky (bool, optional): use Cholesky decomposition. Defaults to False.
 
     Returns:
         nocc_act (int): number of occupied orbitals in the active space.
@@ -82,35 +89,58 @@ def get_pyscf_input_mol_r(
     nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
     nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
     nmo_act = nocc_act + nvir_act
-    mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
+    mo_energy_act = numpy.array(mo_energy[(nocc - nocc_act) : (nocc + nvir_act)])
 
-    if getattr(mf, 'with_df', None):
-        pass
-    else:
-        mf.with_df = df.DF(mf.mol)
-        if auxbasis is not None:
-            mf.with_df.auxbasis = auxbasis
+    if cholesky is False:
+        if getattr(mf, 'with_df', None):
+            pass
         else:
-            try:
-                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
-            except:
-                mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=False)
-        mf._keys.update(['with_df'])
+            mf.with_df = df.DF(mf.mol)
+            if auxbasis is not None:
+                mf.with_df.auxbasis = auxbasis
+            else:
+                try:
+                    mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
+                except RuntimeError:
+                    mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=False)
+            mf._keys.update(['with_df'])
 
-    naux = mf.with_df.get_naoaux()
-    ijslice = (nocc-nocc_act, nocc+nvir_act, nocc-nocc_act, nocc+nvir_act)
-    try:
-        Lpq = None
-        Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff, ijslice, aosym='s2', out=Lpq)
-        Lpq = Lpq.reshape(naux, nmo_act, nmo_act)
-    except AttributeError:
-        # Chunking if filename passed as _cderi.
-        Lpq = []
-        for LpqR in mf.with_df.loop():
-            tmp = None
-            tmp = _ao2mo.nr_e2(LpqR, mo_coeff, ijslice, aosym='s2', out=tmp)
-            Lpq.append(tmp)
-        Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
+        naux = mf.with_df.get_naoaux()
+        ijslice = (nocc-nocc_act, nocc+nvir_act, nocc-nocc_act, nocc+nvir_act)
+        try:
+            Lpq = None
+            Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo_coeff, ijslice, aosym='s2', out=Lpq)
+            Lpq = Lpq.reshape(naux, nmo_act, nmo_act)
+        except AttributeError:
+            # Chunking if filename passed as _cderi.
+            Lpq = []
+            for LpqR in mf.with_df.loop():
+                tmp = None
+                tmp = _ao2mo.nr_e2(LpqR, mo_coeff, ijslice, aosym='s2', out=tmp)
+                Lpq.append(tmp)
+            Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
+            Lpq = numpy.ascontiguousarray(Lpq)
+    else:
+        mo_coeff_act = numpy.array(mo_coeff[:, (nocc - nocc_act) : (nocc + nvir_act)])
+        if hasattr(mf, 'with_df'):
+            full_eri = mf.with_df.ao2mo(mo_coeff_act, compact=True)
+        else:
+            # TODO: use non density-fitting ERI
+            mf.with_df = df.DF(mf.mol)
+            if auxbasis is not None:
+                mf.with_df.auxbasis = auxbasis
+            else:
+                try:
+                    mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=True)
+                except RuntimeError:
+                    mf.with_df.auxbasis = df.make_auxbasis(mf.mol, mp2fit=False)
+            mf._keys.update(['with_df'])
+            full_eri = mf.with_df.ao2mo(mo_coeff_act, compact=True)
+
+        cd = Cholesky(full_eri, err_tol=1e-5, aosym='s4')
+        Lpq = cd.kernel()
+        Lpq = Lpq.reshape(-1, nmo_act, nmo_act)
+        naux = Lpq.shape[0]
 
     if dump_file is not None:
         f = h5py.File(name="%s.h5" % dump_file, mode="w")
@@ -258,10 +288,81 @@ def get_pyscf_input_mol_u(
     return nocc_act, mo_energy_act, Lpq
 
 
+class Cholesky:
+    def __init__(self, eri, err_tol=1e-6, aosym='s1'):
+        """Constructor for incore pivoted cholesky
+
+        Parameters
+        ----------
+        eri : ERI matrix
+            s1 or s4 symmetry. For s1, either 4d or 2d is accepted.
+        err_tol : float, optional
+            threshold to stop pivoted cholesky.
+            The default is 1e-5.
+        aosym : str, optional
+            eri symmetry, by default 's1'
+        """
+        self.eri = eri
+        self.err_tol = err_tol
+        self.aosym = aosym
+        if aosym == 's1':
+            if eri.ndim == 4:
+                self.norb = eri.shape[0]
+            elif eri.ndim == 2:
+                self.norb = int(numpy.rint(numpy.sqrt(eri.shape[0])))
+            self.eri = eri.reshape(self.norb**2, -1)
+        elif aosym == 's4':
+            npair = self.eri.shape[0]
+            norb = math.floor(math.sqrt(1 + 8 * npair) / 2)
+            self.norb = norb
+        else:
+            raise NotImplementedError
+
+    def kernel(self, overwrite_input=False):
+        """Fast pivoted cholesky using LAPACK
+
+        Parameters
+        ----------
+        overwrite_input : bool, optional
+            overwrites the input ERI for efficiency, by default False
+
+        Returns
+        -------
+        np.ndarray
+            (naux, norb, norb) array containing CDERI
+        """
+
+        erimat = self.eri
+
+        pivoted_cholesky = scipy.linalg.lapack.get_lapack_funcs('pstrf', (erimat,))
+        # documentation for ?pstrf:
+        # https://www.netlib.org/lapack/explore-html/de/de0/group__pstrf.html
+        copy = scipy.linalg.get_blas_funcs('copy', (erimat,))
+        cderi_perm, piv, rank, info = pivoted_cholesky(erimat.T, tol=self.err_tol, lower=0, overwrite_a=overwrite_input)
+        cderi = numpy.zeros((rank, erimat.shape[0]), dtype=erimat.dtype)
+        invpiv = numpy.argsort(piv)
+        cderi_ravel = cderi.reshape(-1)
+
+        # Now we must permute the columns of the cholesky factor
+        # In addition, the lower triangle is filled with garbage,
+        # so we shouldn't copy that.
+        # Only the first `rank` columns are needed.
+        for j in range(erimat.shape[0]):
+            i = invpiv[j]
+            # the invocation of BLAS ?copy is equivalent to
+            # Lpq[:min(rank, i+1), j] = Lpq_perm[:min(rank, i+1), i]
+            copy(cderi_perm[: min(rank, i + 1), i], cderi_ravel, offy=j, incy=cderi.shape[1], n=min(rank, i + 1))
+        cderi_perm = None
+        if self.aosym == 's1':
+            return cderi
+        else:  # s4
+            return unpack_tril(cderi)
+
+
 def nr_e2_cross(
         eri, mo_coeff1, mo_coeff2, nocc, nocc_act, nvir_act,
         aosym='s1', mosym='s1', out=None, ao_loc=None):
-    """A wrapper for pyscf.ao2mo.nr_e2 to compute density fitting 
+    """A wrapper for pyscf.ao2mo.nr_e2 to compute density fitting
         MO integrals in active space with two sets of MO coefficients
         as left and right coeff.
         Lpq = C1.T Lmn C2
@@ -286,7 +387,7 @@ def nr_e2_cross(
     from pyscf.ao2mo import _ao2mo
     mo_coeff = numpy.asarray(numpy.hstack((mo_coeff1, mo_coeff2)), order='F')
     offset_mo1 = mo_coeff1.shape[1]
-    ijslice = (nocc-nocc_act, nocc+nvir_act, 
+    ijslice = (nocc-nocc_act, nocc+nvir_act,
                offset_mo1+nocc-nocc_act, offset_mo1+nocc+nvir_act)
     return _ao2mo.nr_e2(eri, mo_coeff, ijslice, aosym, mosym, out, ao_loc)
 
@@ -380,7 +481,7 @@ def get_Lmo_ghf(mf, naux=None, mo_coeff=None, nocc_act=None, nvir_act=None):
 
 
 def get_pyscf_input_mol_g(
-        mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None, 
+        mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
         sort_mo=False):
     """Get ppRPA input from a PySCF generalized or spinor-based calculation.
 
@@ -519,7 +620,7 @@ def get_pyscf_input_mol_frac(
     nmo = (len(mf.mo_energy[0]), len(mf.mo_energy[1]))
     if sort_mo is True:
         nocc, nvir, frac_nocc = get_nocc_nvir_frac(
-            mf.mo_occ, sort_mo=True, mo_energy=mf.mo_energy, 
+            mf.mo_occ, sort_mo=True, mo_energy=mf.mo_energy,
             mo_coeff=mf.mo_coeff)
     else:
         nocc, nvir, frac_nocc = get_nocc_nvir_frac(mf.mo_occ)
@@ -539,7 +640,7 @@ def get_pyscf_input_mol_frac(
             nvir_act = [nvir_act, nvir_act]
         nvir_act = (min(nvir[0], nvir_act[0]), min(nvir[1], nvir_act[1]))
     nmo_act = (
-        nocc_act[0] + nvir_act[0] - frac_nocc[0], 
+        nocc_act[0] + nvir_act[0] - frac_nocc[0],
         nocc_act[1] + nvir_act[1] - frac_nocc[1])
     mo_energy_act = [
         mo_energy[0, (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])],
@@ -608,7 +709,8 @@ def get_pyscf_input_mol_frac(
     return mo_occ, mo_energy_act, Lpq
 
 
-def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
+def get_pyscf_input_sc(
+        kmf, nocc_act=None, nvir_act=None, dump_file=None, cholesky=False):
     """Get ppRPA input from a PySCF supercell SCF calculation.
 
     Args:
@@ -616,6 +718,7 @@ def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
         nocc_act (int, optional): number of active occupied orbitals. Defaults to None.
         nvir_act (int, optional): number of active virtual orbitals. Defaults to None.
         dump_file (str, optional): file name to dump matrix for lib_pprpa. Defaults to None.
+        cholesky (bool, optional): use Cholesky decomposition. Defaults to False.
 
     Returns:
         nocc_act (int): number of occupied orbitals in the active space.
@@ -642,21 +745,30 @@ def get_pyscf_input_sc(kmf, nocc_act=None, nvir_act=None, dump_file=None):
     nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
     nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
     nmo_act = nocc_act + nvir_act
-    mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
+    mo_energy_act = numpy.array(mo_energy[(nocc - nocc_act) : (nocc + nvir_act)])
 
     mo = numpy.asarray(mo_coeff, order='F')
     ijslice = (nocc-nocc_act, nocc+nvir_act, nocc-nocc_act, nocc+nvir_act)
 
     kptijkl = _format_kpts(kpts)
-    Lpq = []
-    for LpqR, _, _ in kmf.with_df.sr_loop(
-            kptijkl[: 2], max_memory=0.8 * max_memory, compact=False):
-        tmp = None
-        tmp = _ao2mo.nr_e2(
-            LpqR.reshape(-1, nao, nao), mo, ijslice, aosym='s1', mosym='s1',
-            out=tmp)
-        Lpq.append(tmp)
-    Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
+    if cholesky is False:
+        Lpq = []
+        for LpqR, _, _ in kmf.with_df.sr_loop(
+                kptijkl[: 2], max_memory=0.8 * max_memory, compact=False):
+            tmp = None
+            tmp = _ao2mo.nr_e2(
+                LpqR.reshape(-1, nao, nao), mo, ijslice, aosym='s1', mosym='s1',
+                out=tmp)
+            Lpq.append(tmp)
+        Lpq = numpy.vstack(Lpq).reshape(naux, nmo_act, nmo_act)
+        Lpq = numpy.ascontiguousarray(Lpq)
+    else:
+        mo_coeff_act = numpy.array(mo_coeff[:, (nocc - nocc_act) : (nocc + nvir_act)])
+        full_eri = kmf.with_df.ao2mo(mo_coeff_act, compact=True)
+        cd = Cholesky(full_eri, err_tol=1e-5, aosym='s4')
+        Lpq = cd.kernel()
+        Lpq = Lpq.reshape(-1, nmo_act, nmo_act)
+        naux = Lpq.shape[0]
 
     if dump_file is not None:
         f = h5py.File(name="%s.h5" % dump_file, mode="w")
@@ -808,7 +920,7 @@ def create_frac_scf_object(mf, frac_spin, frac_orb, frac_occ):
 
     Args:
         mf (PySCF mean-field object): unrestricted PySCF mean-field object.
-        frac_spin (int list): spin channel(s) for fractionally occupied 
+        frac_spin (int list): spin channel(s) for fractionally occupied
             orbitals. Options: [0] or [1] or [0, 1].
         frac_orb (int list): orbital indices with fractional occupation
             numbers.
