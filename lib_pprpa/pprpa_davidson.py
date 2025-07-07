@@ -315,8 +315,8 @@ def _pprpa_contraction(pprpa, tri_vec):
             Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
             Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
         else:
-            Lpq_z[:, :nocc] = Lpq[:, :, :nocc].reshape(naux * nmo, nocc) @ z_oo
-            Lpq_z[:, nocc:] = Lpq[:, :, nocc:].reshape(naux * nmo, nvir) @ z_vv
+            Lpq_z[:, :nocc] = Lpq[:, :, :nocc].reshape(naux * nmo, nocc) @ z_oo.T
+            Lpq_z[:, nocc:] = Lpq[:, :, nocc:].reshape(naux * nmo, nvir) @ z_vv.T
 
         # transpose and reshape for faster multiplication
         Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
