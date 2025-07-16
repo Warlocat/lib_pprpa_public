@@ -2,7 +2,7 @@ import h5py
 import numpy as np
 import scipy
 
-from lib_pprpa.analyze import pprpa_print_a_pair
+from lib_pprpa.analyze import pprpa_print_a_pair, get_pprpa_oscillator_strength
 from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector, \
     diagonalize_pprpa_singlet, diagonalize_pprpa_triplet
 
@@ -612,7 +612,9 @@ def _pprpa_compact_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tr
 
 # analysis functions
 def _pprpa_print_eigenvector(
-        multi, nocc, nvir, thresh, channel, exci0, exci, xy):
+        multi, nocc, nvir, thresh, channel, exci0, exci, xy,
+        # oscillator strength
+        mo_dip=None, xy0=None, xy0_multi=None):
     """Print dominant components of an eigenvector.
 
     Args:
@@ -624,6 +626,11 @@ def _pprpa_print_eigenvector(
         exci0 (double): lowest eigenvalue.
         exci (double array): ppRPA eigenvalue.
         xy (double ndarray): ppRPA eigenvector.
+        mo_dip (double ndarray, optional): molecular dipole moment integrals.
+            Defaults to None.
+        xy0 (double ndarray, optional): eigenvector of the ground state.
+        xy0_multi (string, optional): multiplicity of the ground state eigenvector.
+            Defaults to None.
     """
     if multi == "s":
         oo_dim = int((nocc + 1) * nocc / 2)
@@ -644,6 +651,12 @@ def _pprpa_print_eigenvector(
             print("#%-d %s excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
                   (iroot + 1, multi,
                    (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
+            if mo_dip is not None:
+                f = get_pprpa_oscillator_strength(
+                    nocc=nocc, mo_dip=mo_dip, channel=channel,
+                    exci=exci[iroot], exci0=exci0, xy=xy[iroot], xy0=xy0,
+                    multi=multi, xy0_multi=xy0_multi)
+                print("#    oscillator strength = %-12.6f  a.u." % f)
             if nocc > 0:
                 full = np.zeros(shape=[nocc, nocc], dtype=np.double)
                 full[tri_row_o, tri_col_o] = xy[iroot][:oo_dim]
@@ -666,6 +679,12 @@ def _pprpa_print_eigenvector(
             print("#%-d %s de-excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
                   (iroot + 1, multi,
                    (exci[iroot] - exci0) * au2ev, exci[iroot] * au2ev))
+            if mo_dip is not None:
+                f = get_pprpa_oscillator_strength(
+                    nocc=nocc, mo_dip=mo_dip, channel=channel,
+                    exci=exci[iroot], exci0=exci0,
+                    xy=xy[iroot], xy0=xy0, multi=multi, xy0_multi=xy0_multi)
+                print("#    oscillator strength = %-12.6f  a.u." % f)
             full = np.zeros(shape=[nocc, nocc], dtype=np.double)
             full[tri_row_o, tri_col_o] = xy[iroot][:oo_dim]
             full = np.power(full, 2)
@@ -687,32 +706,41 @@ def _pprpa_print_eigenvector(
 
 
 def _analyze_pprpa_davidson(
-        exci_s, xy_s, exci_t, xy_t, nocc, nvir, print_thresh=0.1, channel="pp"):
+        exci_s, xy_s, exci_t, xy_t, nocc, nvir, print_thresh=0.1, channel="pp", mo_dip=None):
     print("\nanalyze ppRPA results.")
 
     if exci_s is not None and exci_t is not None:
         print("both singlet and triplet results found.")
         if channel == "pp":
             exci0 = min(exci_s[0], exci_t[0])
+            xy0 = xy_s[0] if exci_s[0] < exci_t[0] else xy_t[0]
+            xy0_multi = "s" if exci_s[0] < exci_t[0] else "t"
         else:
             exci0 = max(exci_s[0], exci_t[0])
+            xy0 = xy_s[0] if exci_s[0] > exci_t[0] else xy_t[0]
+            xy0_multi = "s" if exci_s[0] > exci_t[0] else "t"
+
         _pprpa_print_eigenvector(
             multi="s", nocc=nocc, nvir=nvir, thresh=print_thresh,
-            channel=channel, exci0=exci0, exci=exci_s, xy=xy_s)
+            channel=channel, exci0=exci0, exci=exci_s, xy=xy_s,
+            mo_dip=mo_dip, xy0=xy0, xy0_multi=xy0_multi)
         _pprpa_print_eigenvector(
             multi="t", nocc=nocc, nvir=nvir, thresh=print_thresh,
-            channel=channel, exci0=exci0, exci=exci_t, xy=xy_t)
+            channel=channel, exci0=exci0, exci=exci_t, xy=xy_t,
+            mo_dip=mo_dip, xy0=xy0, xy0_multi=xy0_multi)
     else:
         if exci_s is not None:
             print("only singlet results found.")
             _pprpa_print_eigenvector(
                 multi="s", nocc=nocc, nvir=nvir, thresh=print_thresh,
-                channel=channel, exci0=exci_s[0], exci=exci_s, xy=xy_s)
+                channel=channel, exci0=exci_s[0], exci=exci_s, xy=xy_s,
+                mo_dip=mo_dip, xy0=xy_s[0], xy0_multi="s")
         else:
             print("only triplet results found.")
             _pprpa_print_eigenvector(
                 multi="t", nocc=nocc, nvir=nvir, thresh=print_thresh,
-                channel=channel, exci0=exci_t[0], exci=exci_t, xy=xy_t)
+                channel=channel, exci0=exci_t[0], exci=exci_t, xy=xy_t,
+                mo_dip=mo_dip, xy0=xy_t[0], xy0_multi="t")
     return
 
 
@@ -720,7 +748,7 @@ class ppRPA_Davidson():
     def __init__(
             self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=500,
             max_iter=100, trial="identity", residue_thresh=1.0e-7,
-            print_thresh=0.1):
+            print_thresh=0.1, mo_dip=None):
         # necessary input
         self.nocc = nocc  # number of occupied orbitals
         self.mo_energy = np.asarray(mo_energy)  # orbital energy
@@ -741,6 +769,7 @@ class ppRPA_Davidson():
         self.residue_thresh = residue_thresh  # residue threshold
         self.print_thresh = print_thresh  # threshold to print component
         self._compact_subspace = False  # compact large subspace
+        self.mo_dip = mo_dip # vector dipole integrals in MO space
 
         # internal flags
         self.multi = None  # multiplicity
@@ -880,7 +909,7 @@ class ppRPA_Davidson():
         _analyze_pprpa_davidson(
             exci_s=self.exci_s, xy_s=self.xy_s, exci_t=self.exci_t,
             xy_t=self.xy_t, nocc=self.nocc, nvir=self.nvir,
-            print_thresh=self.print_thresh, channel=self.channel)
+            print_thresh=self.print_thresh, channel=self.channel, mo_dip=self.mo_dip)
         return
 
     def contraction(self, tri_vec):

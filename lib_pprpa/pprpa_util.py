@@ -63,7 +63,7 @@ def get_chemical_potential(nocc, mo_energy):
 
     if nspin == 1:
         nmo = len(mo_energy)
-        if nocc == 0:
+        if nocc == 0 or nocc == nmo:
             mu = 0.0
         else:
             mu = (mo_energy[nocc-1] + mo_energy[nocc]) * 0.5
@@ -84,8 +84,7 @@ def get_chemical_potential(nocc, mo_energy):
 
     return mu
 
-
-def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act):
+def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act, mo_dip=None):
     """Get basic input in active space.
 
     Args:
@@ -94,11 +93,15 @@ def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act):
         Lpq (double ndarray): three-center density-fitting matrix in MO space.
         nocc_act (int/int array): number of occupied orbitals.
         nvir_act (int/int array): number of virtual orbitals.
+        mo_dip (double ndarray, optional): dipole moment matrix in MO space. Defaults to None.
 
     Returns:
         nocc_act (int/int array): number of occupied orbitals in active space.
         mo_energy_act (double array/double ndarray): orbital energy in active space.
         Lpq_act (double ndarray): three-center density-fitting matrix in MO space in active space.
+
+        Only if mo_dip is provided:
+        mo_dip_act (double ndarray): dipole moment matrix in MO space in active space.
     """
     nmo = len(mo_energy)
     nvir = nmo - nocc
@@ -107,8 +110,11 @@ def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act):
     mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
     Lpq_act = Lpq[:, (nocc-nocc_act):(nocc+nvir_act),
                   (nocc-nocc_act):(nocc+nvir_act)]
-    return nocc_act, mo_energy_act, Lpq_act
-
+    if mo_dip is not None:
+        mo_dip_act = mo_dip[:, nocc - nocc_act : nocc + nvir_act, nocc - nocc_act : nocc + nvir_act]
+        return nocc_act, mo_energy_act, Lpq_act, mo_dip_act
+    else:
+        return nocc_act, mo_energy_act, Lpq_act
 
 def print_citation():
     __version__ = "0.1"
@@ -144,19 +150,19 @@ A package for particle-particle random phase approximation.
 
 
 def GMRES_Pople(AMultX, ADiag, B, maxIter = 30, tol = 1e-14, printLevel = 0):
-    """ Solve AX = B using Pople's algorithm. 
-        It is designed for solving Z-vector equations for orbital relaxation. 
+    """ Solve AX = B using Pople's algorithm.
+        It is designed for solving Z-vector equations for orbital relaxation.
         Poples's algorithm is highly related to the GMRES/Krylov-space methods.
         But interestingly, Pople's paper is earlier than the GMRES algorithm.
         (https://doi.org/10.1002/qua.560160825)
-        
+
         A = ADiag*[I - Ap], Ap = I - ADiagInv*A, Bp = ADiagInv*B
         Ap*X = X - ADiagInv*A*X
         [I - Ap] X = Bp
         X = span[Bp, Ap*Bp, Ap^2*Bp, ...]
           = span[Bp, ADiagInv*A*Bp, ADiagInv*A^2*Bp, ...]
 
-        ADiag is just for preconditioning. It is not necessary to 
+        ADiag is just for preconditioning. It is not necessary to
         be the exact diagonal elements of A.
     Args:
         AMultX (function): A function to multiply A with X.
@@ -216,7 +222,7 @@ def GMRES_Pople(AMultX, ADiag, B, maxIter = 30, tol = 1e-14, printLevel = 0):
     return X
 
 def GMRES_wrapper(AMultX, ADiag, B, maxIter = 30, tol = 1e-14):
-    """ Solve AX = B using GMRES algorithm. 
+    """ Solve AX = B using GMRES algorithm.
         It is a wrapper of the scipy.sparse.linalg.gmres function.
     Args:
         AMultX (function): A function to multiply A with X.
@@ -292,7 +298,7 @@ def get_nocc_nvir_frac(mo_occ, thresh=1.0e-8, sort_mo=False, mo_energy=None,
     Returns:
         nocc (int array): number of occupied orbitals, including fully
             and fractionally occupied orbitals.
-        nvir (int array): number of virtual orbitals, including completely 
+        nvir (int array): number of virtual orbitals, including completely
             unoccupied and fractionally occupied orbitals.
         frac_nocc (int array): number of fractionally occupied orbitals.
     """
