@@ -2,10 +2,12 @@ import h5py
 import math
 import numpy
 import scipy
-import scipy.linalg
 
-from pyscf import ao2mo
+import pyscf
+import pyscf.dft
 from pyscf.lib import unpack_tril
+from pyscf import df
+from pyscf.ao2mo import _ao2mo
 
 from lib_pprpa.analyze import get_pprpa_nto, get_pprpa_dm
 from lib_pprpa.pprpa_util import start_clock, stop_clock, get_nocc_nvir_frac
@@ -14,8 +16,12 @@ from lib_pprpa.pprpa_util import start_clock, stop_clock, get_nocc_nvir_frac
 # get input from PySCF
 def get_pyscf_input_mol(
         mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
-        sort_mo=False, cholesky=False):
-    import pyscf
+        sort_mo=False, cholesky=False, with_dip=False):
+    """
+    Get input from PySCF for a molecular calculation.
+    Will be saved to a file if `dump_file` is specified.
+    mo_dipole will also be saved if `with_dip` is True. Only implemented for RHF/RKS.
+    """
 
     if isinstance(mf, pyscf.scf.uhf.UHF) or isinstance(mf, pyscf.dft.uks.UKS):
         return get_pyscf_input_mol_u(
@@ -34,7 +40,7 @@ def get_pyscf_input_mol(
     if isinstance(mf, pyscf.scf.rhf.RHF) or isinstance(mf, pyscf.dft.rks.RKS):
         return get_pyscf_input_mol_r(
             mf, auxbasis=auxbasis, nocc_act=nocc_act, nvir_act=nvir_act,
-            dump_file=dump_file, sort_mo=sort_mo, cholesky=cholesky)
+            dump_file=dump_file, sort_mo=sort_mo, cholesky=cholesky, with_dip=with_dip)
 
     if isinstance(mf, pyscf.scf.ghf.GHF) or isinstance(mf, pyscf.dft.gks.GKS):
         return get_pyscf_input_mol_g(
@@ -44,7 +50,7 @@ def get_pyscf_input_mol(
 
 def get_pyscf_input_mol_r(
         mf, auxbasis=None, nocc_act=None, nvir_act=None, dump_file=None,
-        sort_mo=False, cholesky=False):
+        sort_mo=False, cholesky=False, with_dip=False):
     """Get ppRPA input from a PySCF molecular SCF calculation.
 
     Args:
@@ -54,6 +60,7 @@ def get_pyscf_input_mol_r(
         nvir_act (int, optional): number of active virtual orbitals. Defaults to None.
         dump_file (str, optional): file name to dump matrix for lib_pprpa. Defaults to None.
         cholesky (bool, optional): use Cholesky decomposition. Defaults to False.
+        with_dip (bool, optional): save dipole moment. Defaults to False.
 
     Returns:
         nocc_act (int): number of occupied orbitals in the active space.
@@ -90,6 +97,18 @@ def get_pyscf_input_mol_r(
     nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
     nmo_act = nocc_act + nvir_act
     mo_energy_act = numpy.array(mo_energy[(nocc - nocc_act) : (nocc + nvir_act)])
+    
+    if with_dip:
+        print("Computing dipole moment in MO space")
+        from pyscf.tdscf.rhf import _charge_center
+        # Same formulation as in the TDDFT module
+        with mf.mol.with_common_orig(_charge_center(mf.mol)):
+            ao_dip = mf.mol.intor_symmetric("int1e_r", comp=3)
+        mo_dip = mo_coeff.T @ ao_dip @ mo_coeff
+        # mo2 = numpy.einsum('xpq,pi,qj->xij', ao_dip.reshape(-1,nmo,nmo), mo_coeff, mo_coeff.conj())
+        # assert numpy.allclose(mo2, mo_dip)
+        mo_dip = mo_dip[:, (nocc - nocc_act) : (nocc + nvir_act), (nocc - nocc_act) : (nocc + nvir_act)]
+        print("Done calculating dip.")
 
     if cholesky is False:
         if getattr(mf, 'with_df', None):
@@ -147,6 +166,8 @@ def get_pyscf_input_mol_r(
         f["nocc"] = numpy.asarray(nocc_act)
         f["mo_energy"] = numpy.asarray(mo_energy_act)
         f["Lpq"] = numpy.asarray(Lpq)
+        if with_dip:
+            f["mo_dipole"] = numpy.asarray(mo_dip)
         f.close()
 
     print("\nget input for lib_pprpa from PySCF (molecule)")
@@ -157,7 +178,10 @@ def get_pyscf_input_mol_r(
 
     stop_clock("getting input for molecule ppRPA from PySCF")
 
-    return nocc_act, mo_energy_act, Lpq
+    if with_dip:
+        return nocc_act, mo_energy_act, Lpq, mo_dip
+    else:
+        return nocc_act, mo_energy_act, Lpq
 
 
 def get_pyscf_input_mol_u(

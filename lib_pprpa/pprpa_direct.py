@@ -387,7 +387,7 @@ def pprpa_orthonormalize_eigenvector(multi, nocc, exci, xy):
 
 # analysis functions
 def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
-                             pp_state, exci0, exci, xy):
+                             pp_state, exci0, exci, xy, mo_dip=None, osc_channel='pp', first_state_e=None, xy0_multi=None):
     """Print dominant components of an eigenvector.
 
     Args:
@@ -401,6 +401,14 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
         exci0 (double): lowest eigenvalue.
         exci (double array): ppRPA eigenvalue.
         xy (double ndarray): ppRPA eigenvector.
+        mo_dip (double ndarray, optional): molecular dipole moment in MO basis.
+            Defaults to None.
+        osc_channel (string, optional): oscillator strength channel, 'pp' or 'hh'.
+            Defaults to 'pp'.
+        first_state_e (double, optional): energy of the first state of `multi` if different from `exci0`.
+            Defaults to None.
+        xy0_multi (string, optional): multiplicity of the ground state eigenvector.
+            Defaults to None.
     """
     if multi == "s":
         oo_dim = int((nocc + 1) * nocc / 2)
@@ -418,10 +426,21 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
 
     au2ev = 27.211386
 
+    if first_state_e is not None:
+        e0 = first_state_e
+    else:
+        e0 = exci0
+
     for istate in range(min(hh_state, oo_dim)):
         print("#%-d %s de-excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, multi, (exci[oo_dim-istate-1] - exci0) * au2ev,
                exci[oo_dim-istate-1] * au2ev))
+        if mo_dip is not None:
+            f = get_pprpa_oscillator_strength(
+                nocc=nocc, nvir=nvir, mo_dip=mo_dip, channel=osc_channel,
+                exci=exci[oo_dim-istate-1], exci0=e0,
+                xy=xy[oo_dim-istate-1], xy0=xy[oo_dim-1], multi=multi, xy0_multi=xy0_multi)
+            print("#    oscillator strength = %-12.6f  a.u." % f)
         full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
         full[tri_row_o, tri_col_o] = xy[oo_dim-istate-1][:oo_dim]
         full = numpy.power(full, 2)
@@ -444,6 +463,12 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
         print("#%-d %s excitation:  exci= %-12.6f  eV   2e=  %-12.6f  eV" %
               (istate + 1, multi, (exci[oo_dim+istate] - exci0) * au2ev,
                exci[oo_dim+istate] * au2ev))
+        if mo_dip is not None:
+            f = get_pprpa_oscillator_strength(
+                nocc=nocc, nvir=nvir, mo_dip=mo_dip, channel=osc_channel,
+                exci=exci[oo_dim+istate], exci0=e0,
+                xy=xy[oo_dim+istate], xy0=xy[oo_dim], multi=multi, xy0_multi=xy0_multi)
+            print("#    oscillator strength = %-12.6f  a.u." % f)
         full = numpy.zeros(shape=[nocc, nocc], dtype=numpy.double)
         full[tri_row_o, tri_col_o] = xy[oo_dim+istate][:oo_dim]
         full = numpy.power(full, 2)
@@ -467,26 +492,38 @@ def _pprpa_print_eigenvector(multi, nocc, nvir, nocc_fro, thresh, hh_state,
 
 def _analyze_pprpa_direct(
         exci_s, xy_s, exci_t, xy_t, nocc, nvir, nelec="n-2", print_thresh=0.1,
-        hh_state=5, pp_state=5, nocc_fro=0):
+        hh_state=5, pp_state=5, nocc_fro=0, mo_dip=None, osc_channel='pp'):
     print("\nanalyze ppRPA results.")
     oo_dim_s = int((nocc + 1) * nocc / 2)
     oo_dim_t = int((nocc - 1) * nocc / 2)
+    
     if exci_s is not None and exci_t is not None:
         print("both singlet and triplet results found.")
         if nelec == "n-2":
-            exci0 = min(exci_s[oo_dim_s], exci_t[oo_dim_t])
+            e0t = exci_t[oo_dim_t]
+            e0s = exci_s[oo_dim_s]
+            exci0 = min(e0s, e0t)
         else:
-            exci0 = max(exci_s[oo_dim_s-1], exci_t[oo_dim_t-1])
+            e0t = exci_t[oo_dim_t-1]
+            e0s = exci_s[oo_dim_s-1]
+            exci0 = max(e0s, e0t)
+
+        xy0_multi = None
+        if exci0 == e0s:
+            xy0_multi = "s"
+        else:
+            xy0_multi = "t"
+
         _pprpa_print_eigenvector(
             multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
             thresh=print_thresh,
             hh_state=hh_state, pp_state=pp_state, exci0=exci0,
-            exci=exci_s, xy=xy_s)
+            exci=exci_s, xy=xy_s, mo_dip=mo_dip, osc_channel=osc_channel, first_state_e=e0s, xy0_multi=xy0_multi)
         _pprpa_print_eigenvector(
             multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
             thresh=print_thresh,
             hh_state=hh_state, pp_state=pp_state, exci0=exci0,
-            exci=exci_t, xy=xy_t)
+            exci=exci_t, xy=xy_t, mo_dip=mo_dip, osc_channel=osc_channel, first_state_e=e0t, xy0_multi=xy0_multi)
     else:
         if exci_s is not None:
             print("only singlet results found.")
@@ -494,14 +531,14 @@ def _analyze_pprpa_direct(
             _pprpa_print_eigenvector(
                 multi="s", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
                 thresh=print_thresh, hh_state=hh_state,
-                pp_state=pp_state, exci0=exci0, exci=exci_s, xy=xy_s)
+                pp_state=pp_state, exci0=exci0, exci=exci_s, xy=xy_s, mo_dip=mo_dip, osc_channel=osc_channel)
         else:
             print("only triplet results found.")
             exci0 = exci_s[oo_dim_t] if nelec == "n-2" else exci_s[oo_dim_t-1]
             _pprpa_print_eigenvector(
                 multi="t", nocc=nocc, nvir=nvir, nocc_fro=nocc_fro,
                 thresh=print_thresh, hh_state=hh_state,
-                pp_state=pp_state, exci0=exci0, exci=exci_t, xy=xy_t)
+                pp_state=pp_state, exci0=exci0, exci=exci_t, xy=xy_t, mo_dip=mo_dip, osc_channel=osc_channel)
     return
 
 
@@ -731,7 +768,8 @@ class ppRPA_direct():
             exci_s=self.exci_s, xy_s=self.xy_s, exci_t=self.exci_t,
             xy_t=self.xy_t, nocc=self.nocc, nvir=self.nvir, nelec=self.nelec,
             print_thresh=self.print_thresh, hh_state=self.hh_state,
-            pp_state=self.pp_state, nocc_fro=nocc_fro)
+            pp_state=self.pp_state, nocc_fro=nocc_fro, mo_dip=self.mo_dip,
+            osc_channel=self.osc_channel)
         return
 
     def analyze_ab(self, nocc_fro=0):

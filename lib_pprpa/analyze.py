@@ -238,7 +238,7 @@ def get_pprpa_dm(multi, state, xy, nocc, nvir, mo_coeff, nocc_full,
 
 # oscillator strength
 def get_pprpa_oscillator_strength(
-        nocc, nvir, mo_dip, channel, exci, exci0, xy, xy0):
+        nocc, nvir, mo_dip, channel, exci, exci0, xy, xy0, multi='ab', xy0_multi=None):
     """Compute oscillator strength from restricted pp-TDA or hh-TDA.
     For restricted case, ground state and all singlets are closed-shell.
     Thus, only alpha-beta-alpha-beta block is needed.
@@ -258,32 +258,79 @@ def get_pprpa_oscillator_strength(
         exci0 (double): ground-state eigenvalue.
         xy (double array): excited-state eigenvector.
         xy0 (double array): ground-state eigenvector.
+        multi (char): multiplicity of the excited state. One of 's', 't' or 'ab'.
+        xy0_multi (char): multiplicity of the ground state.
+
 
     Return:
         f (double): oscillator strength.
     """
-    oo_dim = nocc * nocc
+    from lib_pprpa.grad.grad_utils import get_xy_full
+
+    if multi == 's':
+        oo_dim = (nocc + 1) * nocc // 2
+    elif multi == 't':
+        oo_dim = (nocc - 1) * nocc // 2
+    else: # 'ab'
+        oo_dim = nocc * nocc
+
+    xy0_multi = xy0_multi if xy0_multi is not None else multi
+    # disallowed transition. XY and XY0 have different dimensions when expanded
+    if xy0_multi != multi:
+        return 0.0
+
+    ints_oo = mo_dip[:,:nocc,:nocc]
+    ints_vv = mo_dip[:,nocc:,nocc:]
+
     if channel == 'pp':
-        full = xy[oo_dim:].reshape(nvir, nvir)
-        full0 = xy0[oo_dim:].reshape(nvir, nvir)
+        if multi == 'ab':
+            vv_shape = (nvir, nvir)
+            full = xy[oo_dim:].reshape(vv_shape)
+            full0 = xy0[oo_dim:].reshape(vv_shape)
+            # calculate transition dipole <Psi_0|r|Psi_m>
+            trans_dip = numpy.zeros(shape=[3], dtype=numpy.double)
+            trans_dip += numpy.einsum(
+                'ab,ad,rdb->r', full0, full, ints_vv, optimize=True)
+            # trans_dip -= numpy.einsum(
+            # 'ab,ca,rcb->r', full0, full, ints_vv, optimize=True)
+            # trans_dip -= numpy.einsum(
+            # 'ab,bd,rda->r', full0, full, ints_vv, optimize=True)
+            trans_dip += numpy.einsum(
+                'ab,cb,rca->r', full0, full, ints_vv, optimize=True)
+            # trans_dip += 2.0 * numpy.einsum(
+            #     'ab,ab,rmm->r', full0, full, ints_oo, optimize=True)
+            trans_dip -= numpy.einsum(
+            'ab,ba,rmm->r', full0, full, ints_oo, optimize=True)
+        else:
+            _, full = get_xy_full(xy, oo_dim, mult=multi)
+            _, full0 = get_xy_full(xy0, oo_dim, mult=multi)
 
-        # calculate transition dipole <Psi_0|r|Psi_m>
-        trans_dip = numpy.zeros(shape=[3], dtype=numpy.double)
-        trans_dip += numpy.einsum(
-            'ab,ad,rdb->r', full0, full, mo_dip[:,nocc:,nocc:], optimize=True)
-        #trans_dip -= numpy.einsum(
-        # 'ab,ca,rcb->r', full0, full, mo_dip[:,nocc:,nocc:], optimize=True)
-        #trans_dip -= numpy.einsum(
-        # 'ab,bd,rda->r', full0, full, mo_dip[:,nocc:,nocc:], optimize=True)
-        trans_dip += numpy.einsum(
-            'ab,cb,rca->r', full0, full, mo_dip[:,nocc:,nocc:], optimize=True)
-        trans_dip += 2.0 * numpy.einsum(
-            'ab,ab,rmm->r', full0, full, mo_dip[:,:nocc,:nocc], optimize=True)
-        #trans_dip -= numpy.einsum(
-        # 'ab,ba,rmm->r', full0, full, mo_dip[:,:nocc,:nocc], optimize=True)
+            trans_dip = numpy.einsum("pa,qa,rpq->r", full0, full, ints_vv, optimize=True)
+    else: # hh
+        if multi == 'ab':
+            oo_shape = (nocc, nocc)
+            full = xy[:oo_dim].reshape(oo_shape)
+            full0 = xy0[:oo_dim].reshape(oo_shape)
+            # calculate transition dipole <Psi_0|r|Psi_m>
+            trans_dip = numpy.zeros(shape=[3], dtype=numpy.double)
+            trans_dip += numpy.einsum(
+                'ij,ij,rpp->r', full0, full, ints_oo, optimize=True)
+            # trans_dip -= numpy.einsum(
+            #     'ij,ji,rpp->r', full0, full, ints_oo, optimize=True)
+            # trans_dip -= numpy.einsum(
+            #     'ij,ip,rpj->r', full0, full, ints_oo, optimize=True)
+            trans_dip += numpy.einsum(
+                'ij,jp,rpi->r', full0, full, ints_oo, optimize=True)
+            # trans_dip += numpy.einsum(
+            #     'ij,pi,rpj->r', full0, full, ints_oo, optimize=True)
+            trans_dip -= numpy.einsum(
+                'ij,pj,rpi->r', full0, full, ints_oo, optimize=True)
+        else:
+            full, _ = get_xy_full(xy, oo_dim, mult=multi)
+            full0, _ = get_xy_full(xy0, oo_dim, mult=multi)
 
-        # |<Psi_0|r|Psi_m>|^2
-        f = 2.0 / 3.0 * (exci - exci0) * numpy.sum(trans_dip**2)
-    else:
-        raise NotImplementedError('hh-TDA oscillator strength not implemented.')
+            trans_dip = -numpy.einsum("pj,qj,rpq->r", full0, full, ints_oo, optimize=True)
+
+    # |<Psi_0|r|Psi_m>|^2
+    f = 2.0 / 3.0 * (exci - exci0) * numpy.sum(trans_dip**2)
     return f
