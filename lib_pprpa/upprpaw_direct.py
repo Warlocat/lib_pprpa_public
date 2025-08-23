@@ -454,7 +454,8 @@ def _analyze_upprpaw_direct(exci, xy, nocc, nvir, nelec='n-2', print_thresh=0.1,
 class UppRPAwDirect(UppRPA_direct):
     def __init__(
             self, nocc, mo_energy, Lpq, fxc=None, hh_state=5, pp_state=5, 
-            nelec='n-2', active=[None, None], print_thresh=0.1, use_gsc_e=True,
+            nelec='n-2', active=[None, None], print_thresh=0.1, 
+            with_screening = True,
             use_rpa4='none' # avail: 'response', 'all', 'none'
             ):
         super().__init__(
@@ -463,6 +464,7 @@ class UppRPAwDirect(UppRPA_direct):
         self.fxc = fxc
         self.w_mat = None
         self.use_rpa4 = use_rpa4.lower()
+        self.with_screening = with_screening
         self.active = process_active_space(active)
 
     def get_K(self, use_rpa=False):
@@ -488,7 +490,9 @@ class UppRPAwDirect(UppRPA_direct):
         else:
             raise NotImplementedError
 
-        self.w_mat = get_W(kHxc, m_mat, self.nmo, self.nocc)
+        no_screening = not self.with_screening
+        self.w_mat = get_W(kHxc, m_mat, self.nmo, self.nocc, 
+                           no_screening=no_screening)
         return self.w_mat
 
     def check_parameter(self, gsc2_e=True, mf=None):
@@ -546,18 +550,39 @@ class UppRPAwDirect(UppRPA_direct):
         return
 
     def analyze(self, nocc_fro=(0, 0)):
+        nocc = self.nocc
+        nmo = (len(self.mo_energy[0]), len(self.mo_energy[1]))
+        nvir = (nmo[0] - nocc[0], nmo[1] - nocc[1])
+        act_alpha, act_beta = self.active
+        nocc_act = [act_alpha[0], act_beta[0]]
+        nvir_act = [act_alpha[1], act_beta[1]]
+        nocc_act[0] = nocc[0] if nocc_act[0] == None else min(nocc_act[0], nocc[0])
+        nocc_act[1] = nocc[1] if nocc_act[1] == None else min(nocc_act[1], nocc[1])
+        nvir_act[0] = nvir[0] if nvir_act[0] == None else min(nvir_act[0], nvir[0])
+        nvir_act[1] = nvir[1] if nvir_act[1] == None else min(nvir_act[1], nvir[1])
+        nocc = nocc_act
+        nvir = nvir_act
+        nmo = [nocc[0] + nvir[0], nocc[1] + nvir[1]]
         _analyze_upprpaw_direct(
-            self.exci, self.xy, (self.active[0][0],self.active[1][0]), 
-            (self.active[0][1], self.active[1][1]), 
+            self.exci, self.xy, nocc, nvir, 
             nelec=self.nelec,
             print_thresh=self.print_thresh, hh_state=self.hh_state,
             pp_state=self.pp_state, nocc_fro=nocc_fro
         )
 
     def dump_flags(self):
-        alpha_act, beta_act = self.active
-        nocc = [alpha_act[0], beta_act[0]]
-        nvir = [alpha_act[1], beta_act[1]]
+        nocc = self.nocc
+        nmo = (len(self.mo_energy[0]), len(self.mo_energy[1]))
+        nvir = (nmo[0] - nocc[0], nmo[1] - nocc[1])
+        act_alpha, act_beta = self.active
+        nocc_act = [act_alpha[0], act_beta[0]]
+        nvir_act = [act_alpha[1], act_beta[1]]
+        nocc_act[0] = nocc[0] if nocc_act[0] == None else min(nocc_act[0], nocc[0])
+        nocc_act[1] = nocc[1] if nocc_act[1] == None else min(nocc_act[1], nocc[1])
+        nvir_act[0] = nvir[0] if nvir_act[0] == None else min(nvir_act[0], nvir[0])
+        nvir_act[1] = nvir[1] if nvir_act[1] == None else min(nvir_act[1], nvir[1])
+        nocc = nocc_act
+        nvir = nvir_act
         nmo = [nocc[0] + nvir[0], nocc[1] + nvir[1]]
         # ====================> calculate dimensions <===================
         # (alpha, alpha) subspace
@@ -595,10 +620,18 @@ class UppRPAwDirect(UppRPA_direct):
         return
 
     def check_memory(self):
-        alpha_act, beta_act = self.active
-        nocc = [alpha_act[0], beta_act[0]]
-        nvir = [alpha_act[1], beta_act[1]]
-        nmo = [nocc[0] + nvir[0], nocc[1] + nvir[1]]
+        nocc = self.nocc
+        nmo = (len(self.mo_energy[0]), len(self.mo_energy[1]))
+        nvir = (nmo[0] - nocc[0], nmo[1] - nocc[1])
+        act_alpha, act_beta = self.active
+        nocc_act = [act_alpha[0], act_beta[0]]
+        nvir_act = [act_alpha[1], act_beta[1]]
+        nocc_act[0] = nocc[0] if nocc_act[0] == None else min(nocc_act[0], nocc[0])
+        nocc_act[1] = nocc[1] if nocc_act[1] == None else min(nocc_act[1], nocc[1])
+        nvir_act[0] = nvir[0] if nvir_act[0] == None else min(nvir_act[0], nvir[0])
+        nvir_act[1] = nvir[1] if nvir_act[1] == None else min(nvir_act[1], nvir[1])
+        nocc = nocc_act
+        nvir = nvir_act
         # ====================> calculate dimensions <===================
         # (alpha, alpha) subspace
         aavv_dim = int(nvir[0] * (nvir[0] + 1) / 2)
