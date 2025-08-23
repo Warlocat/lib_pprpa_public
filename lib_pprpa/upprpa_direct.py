@@ -334,8 +334,6 @@ def _analyze_pprpa_direct(
             'abab', nocc, nvir, nocc_fro, print_thresh, hh_state,
             pp_state, exci0, exci_ab, xy[2])
 
-    pass
-
 
 class UppRPA_direct():
     """Direct solver class for unrestricted ppRPA.
