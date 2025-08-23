@@ -6,7 +6,7 @@ from scipy.sparse import csc_matrix
 
 from lib_pprpa.upprpa_direct import UppRPA_direct
 from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector
-from lib_pprpa.upprpa_direct import upprpa_orthonormalize_eigenvector
+from lib_pprpa.upprpa_direct import upprpa_orthonormalize_eigenvector, _pprpa_print_eigenvector
 from lib_pprpa.pprpa_util import inner_product, get_chemical_potential, start_clock, stop_clock
 from lib_pprpa.gsc import mo_energy_gsc2
 
@@ -114,7 +114,7 @@ def diagonalize_pprpa_subspace_same_spin(nocc, mo_energy, w_mat, mu=None,
 
 
 def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None, 
-                                         active=[None, None]):
+                                         active=[(None,None),(None,None)]):
     """Diagonalize ppRPA matrix in subspace (alpha beta, alpha, beta).
 
     Args:
@@ -135,26 +135,39 @@ def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None,
     nvir = (nmo[0]-nocc[0], nmo[1]-nocc[1])
     if mu is None:
         mu = get_chemical_potential(nocc, mo_energy)
+    
+    act_alpha, act_beta = active
+    nocc_act = [act_alpha[0], act_beta[0]]
+    nvir_act = [act_alpha[1], act_beta[1]]
+    nocc_act[0] = nocc[0] if nocc_act[0] == None else min(nocc_act[0], nocc[0])
+    nocc_act[1] = nocc[1] if nocc_act[1] == None else min(nocc_act[1], nocc[1])
+    nvir_act[0] = nvir[0] if nvir_act[0] == None else min(nvir_act[0], nvir[0])
+    nvir_act[1] = nvir[1] if nvir_act[1] == None else min(nvir_act[1], nvir[1])
 
     # ===========================> A matrix <============================
-    A = w_mat[nocc[0]:, nocc[1]:, nocc[0]:, nocc[1]:]
-    A = A.reshape(nvir[0]*nvir[1], nvir[0]*nvir[1])
+    A = w_mat[nocc[0]:(nocc[0]+nvir_act[0]), nocc[1]:(nocc[1]+nvir_act[1]),\
+              nocc[0]:(nocc[0]+nvir_act[0]), nocc[1]:(nocc[1]+nvir_act[1])]
+    A = A.reshape(nvir_act[0]*nvir_act[1], nvir_act[0]*nvir_act[1])
     orb_sum = numpy.asarray(
-        mo_energy[0][nocc[0]:, None] + mo_energy[1][None, nocc[1]:]
+        mo_energy[0][nocc[0]:(nocc[0]+nvir_act[0]), None] +\
+            mo_energy[1][None, nocc[1]:(nocc[1]+nvir_act[1])]
     ).reshape(-1)
     orb_sum -= 2.0 * mu
     numpy.fill_diagonal(A, A.diagonal() + orb_sum)
     trace_A = numpy.trace(A)
 
     # ===========================> B matrix <============================
-    B = w_mat[nocc[0]:, nocc[1]:, :nocc[0], :nocc[1]]
-    B = B.reshape(nvir[0]*nvir[1], nocc[0]*nocc[1])
+    B = w_mat[nocc[0]:(nocc[0]+nvir_act[0]), nocc[1]:(nocc[1]+nvir_act[1]),\
+              (nocc[0]-nocc_act[0]):nocc[0], (nocc[1]-nocc_act[1]):nocc[1]]
+    B = B.reshape(nvir_act[0]*nvir_act[1], nocc_act[0]*nocc_act[1])
 
     # ===========================> C matrix <============================
-    C = w_mat[:nocc[0], :nocc[1], :nocc[0], :nocc[1]]
-    C = C.reshape(nocc[0]*nocc[1], nocc[0]*nocc[1])
+    C = w_mat[(nocc[0]-nocc_act[0]):nocc[0], (nocc[1]-nocc_act[1]):nocc[1],\
+              (nocc[0]-nocc_act[0]):nocc[0], (nocc[1]-nocc_act[1]):nocc[1]]
+    C = C.reshape(nocc_act[0]*nocc_act[1], nocc_act[0]*nocc_act[1])
     orb_sum = numpy.asarray(
-        mo_energy[0][:nocc[0], None] + mo_energy[1][None, :nocc[1]]
+        mo_energy[0][(nocc[0]-nocc_act[0]):nocc[0], None] +\
+            mo_energy[1][None, (nocc[1]-nocc_act[1]):nocc[1]]
     ).reshape(-1)
     orb_sum -= 2.0 * mu
     numpy.fill_diagonal(C, C.diagonal() - orb_sum)
@@ -167,7 +180,7 @@ def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None,
     M = numpy.concatenate((M_upper, M_lower), axis=0)
     del A, B, C
     # M to WM, where W is the metric matrix [[-I, 0], [0, I]]
-    M[:nocc[0]*nocc[1]][:] *= -1.0
+    M[:nocc_act[0]*nocc_act[1]][:] *= -1.0
 
     # =====================> solve for eigenpairs <======================
     exci, xy = scipy.linalg.eig(M)
@@ -180,7 +193,7 @@ def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None,
     xy = xy[idx, :]
     upprpa_orthonormalize_eigenvector('abab', nocc, exci, xy)
 
-    sum_exci = numpy.sum(exci[nocc[0]*nocc[1]:])
+    sum_exci = numpy.sum(exci[nocc_act[0]*nocc_act[1]:])
     ec = sum_exci - trace_A
 
     return exci, xy, ec
@@ -193,6 +206,7 @@ def get_K(fxc, Lpq, rpa=False):
         fxc (list of numpy.ndarray): exchange-correlation kernel, 
             [aaaa, bbbb, aabb].
         Lpq (list of double ndarray): three-center RI matrices in MO space.
+        rpa (bool): whether to include exchange-correlation kernel.
 
     Returns:
         k_hxc (list of numpy.ndarray): Hartree-exchange-correlation kernel
@@ -201,18 +215,15 @@ def get_K(fxc, Lpq, rpa=False):
     """
     # aaaa
     pqrs = numpy.einsum('Ppq,Psr->pqrs', Lpq[0], Lpq[0], optimize=True)
-    kaa_hxc = fxc[0] + pqrs
+    kaa_hxc = pqrs if rpa else (fxc[0] + pqrs)
+
     # bbbb
     pqrs = numpy.einsum('Ppq,Psr->pqrs', Lpq[1], Lpq[1], optimize=True)
-    kbb_hxc = fxc[1] + pqrs
+    kbb_hxc = pqrs if rpa else (fxc[1] + pqrs)
+
     # aabb
     pqrs = numpy.einsum('Ppq,Psr->pqrs', Lpq[0], Lpq[1], optimize=True)
-    kab_hxc = fxc[2] + pqrs
-
-    if rpa is True:
-        kaa_hxc -= fxc[0]
-        kbb_hxc -= fxc[1]
-        kab_hxc -= fxc[2]
+    kab_hxc = pqrs if rpa else (fxc[2] + pqrs)
 
     return kaa_hxc, kbb_hxc, kab_hxc
 
@@ -341,6 +352,105 @@ def get_W(k_hxc, m_mat, nmo, nocc, no_screening=False):
     return w_mat
 
 
+def _is_int_or_none(x):
+    # Accept plain ints (not bools) or None
+    return x is None or (isinstance(x, int) and not isinstance(x, bool))
+
+def _as_pair(obj):
+    """Convert an iterable to a validated 2-item list [nocc, nvir]."""
+    try:
+        a, b = list(obj)
+    except Exception:
+        raise ValueError("Each active-space pair must be an iterable of length 2.")
+    if not (_is_int_or_none(a) and _is_int_or_none(b)):
+        raise TypeError("Active-space entries must be integers or None.")
+    if isinstance(a, int) and a < 0:
+        raise ValueError("nocc_act must be >= 0 or None.")
+    if isinstance(b, int) and b < 0:
+        raise ValueError("nvir_act must be >= 0 or None.")
+    return [a, b]
+
+def process_active_space(spec):
+    """
+    Normalize user-defined active space specs for UHF/UKS into:
+        [[nocc_act_alpha, nvir_act_alpha],
+         [nocc_act_beta,  nvir_act_beta]]
+
+    Accepted inputs:
+      - [nocc_act, nvir_act]              (applies to both alpha and beta)
+      - (nocc_act, nvir_act)
+      - [[nocc_acta, nvir_acta], [nocc_actb, nvir_actb]]
+      - ((nocc_acta, nvir_acta), (nocc_actb, nvir_actb))
+
+    Integers must be >= 0; None means “all” for that category.
+    """
+    if isinstance(spec, (list, tuple)):
+        # Single pair → apply to both spin channels
+        if len(spec) == 2 and all(_is_int_or_none(x) for x in spec):
+            pair = _as_pair(spec)
+            return [pair[:], pair[:]]
+
+        # Two pairs → alpha then beta
+        if len(spec) == 2 and all(isinstance(s, (list, tuple)) for s in spec):
+            alpha = _as_pair(spec[0])
+            beta  = _as_pair(spec[1])
+            return [alpha, beta]
+
+    raise ValueError(
+        "Active-space input must be either [nocc_act, nvir_act] or "
+        "[[nocc_acta, nvir_acta], [nocc_actb, nvir_actb]], with ints or None."
+    )
+
+def _analyze_upprpaw_direct(exci, xy, nocc, nvir, nelec='n-2', print_thresh=0.1,
+                            hh_state=5, pp_state=5, nocc_fro=0):
+    print('\nanalyze U-ppRPAW results.')
+    oo_dim_aa = int((nocc[0] - 1) * nocc[0] / 2)
+    oo_dim_bb = int((nocc[1] - 1) * nocc[1] / 2)
+    oo_dim_ab = int(nocc[0] * nocc[1])
+
+    exci_aa = exci[0]
+    exci_bb = exci[1]
+    exci_ab = exci[2]
+
+    exci0_list = []
+    if exci_aa is not None:
+        print('(alpha alpha, alpha alpha) results found.')
+        if nelec == 'n-2':
+            exci0_list.append(exci_aa[oo_dim_aa])
+        else:
+            exci0_list.append(exci_aa[oo_dim_aa - 1])
+    if exci_bb is not None:
+        print('(beta beta, beta beta) results found.')
+        if nelec == 'n-2':
+            exci0_list.append(exci_bb[oo_dim_bb])
+        else:
+            exci0_list.append(exci_bb[oo_dim_bb - 1])
+    if exci_ab is not None:
+        print('(alpha beta, alpha beta) results found.')
+        if nelec == 'n-2':
+            exci0_list.append(exci_ab[oo_dim_ab])
+        else:
+            exci0_list.append(exci_ab[oo_dim_ab])
+    if nelec == 'n-2':
+        exci0 = min(exci0_list)
+    else:
+        exci0 = max(exci0_list)
+
+    if exci_aa is not None:
+        _pprpa_print_eigenvector(
+            'aaaa', nocc[0], nvir[0], nocc_fro[0], print_thresh, hh_state,
+            pp_state, exci0, exci_aa, xy[0])
+    if exci_bb is not None:
+        _pprpa_print_eigenvector(
+            'bbbb', nocc[1], nvir[1], nocc_fro[1], print_thresh, hh_state,
+            pp_state, exci0, exci_bb, xy[1])
+    if exci_ab is not None:
+        _pprpa_print_eigenvector(
+            'abab', nocc, nvir, nocc_fro, print_thresh, hh_state,
+            pp_state, exci0, exci_ab, xy[2])
+    pass
+
+
 class UppRPAwDirect(UppRPA_direct):
     def __init__(
             self, nocc, mo_energy, Lpq, fxc, hh_state=5, pp_state=5, 
@@ -351,8 +461,8 @@ class UppRPAwDirect(UppRPA_direct):
         self.fxc = fxc
         self.kHxc = None
         self.w_mat = None
-        self.active = active
-    
+        self.active = process_active_space(active)
+
     def get_K(self):
         self.kHxc = get_K(self.fxc, self.Lpq)
         return self.kHxc
@@ -392,7 +502,7 @@ class UppRPAwDirect(UppRPA_direct):
             start_clock("U-ppRPAw direct: (alpha alpha, alpha alpha)")
             aa_exci, aa_xy, aa_ec = diagonalize_pprpa_subspace_same_spin(
                 self.nocc[0], self.mo_energy[0], self.w_mat[0], mu=self.mu,
-                active=self.active
+                active=self.active[0]
             )
             stop_clock("U-ppRPAw direct: (alpha alpha, alpha alpha)")
         else:
@@ -402,7 +512,7 @@ class UppRPAwDirect(UppRPA_direct):
             start_clock("U-ppRPAw direct: (beta beta, beta beta)")
             bb_exci, bb_xy, bb_ec = diagonalize_pprpa_subspace_same_spin(
                 self.nocc[1], self.mo_energy[1], self.w_mat[1], mu=self.mu,
-                active=self.active
+                active=self.active[1]
             )
             stop_clock("U-ppRPAw direct: (beta beta, beta beta)")
         else:
@@ -423,3 +533,13 @@ class UppRPAwDirect(UppRPA_direct):
         self.xy = [aa_xy, bb_xy, ab_xy]
 
         return
+
+    def analyze(self, nocc_fro=(0, 0)):
+        _analyze_upprpaw_direct(
+            self.exci, self.xy, (self.active[0][0],self.active[1][0]), 
+            (self.active[0][1], self.active[1][1]), 
+            nelec=self.nelec,
+            print_thresh=self.print_thresh, hh_state=self.hh_state,
+            pp_state=self.pp_state, nocc_fro=nocc_fro
+        )
+
