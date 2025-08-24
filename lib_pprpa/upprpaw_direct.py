@@ -199,13 +199,13 @@ def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None,
     return exci, xy, ec
 
 
-def get_K(fxc, Lpq, rpa=False):
+def get_K(Lpq, fxc=None, rpa=False):
     """Construct Hartree-exchange-correlation kernel matrix in MO basis.
 
     Args:
+        Lpq (list of double ndarray): three-center RI matrices in MO space.
         fxc (list of numpy.ndarray): exchange-correlation kernel, 
             [aaaa, bbbb, aabb].
-        Lpq (list of double ndarray): three-center RI matrices in MO space.
         rpa (bool): whether to include exchange-correlation kernel.
 
     Returns:
@@ -213,6 +213,8 @@ def get_K(fxc, Lpq, rpa=False):
             matrix in MO basis, [aaaa, bbbb, aabb]. 
             bbaa = aabb.transpose(2,3,0,1)
     """
+    if rpa == False:
+        assert fxc is not None
     # aaaa
     pqrs = numpy.einsum('Ppq,Psr->pqrs', Lpq[0], Lpq[0], optimize=True)
     kaa_hxc = pqrs if rpa else (fxc[0] + pqrs)
@@ -468,7 +470,7 @@ class UppRPAwDirect(UppRPA_direct):
         self.active = process_active_space(active)
 
     def get_K(self, use_rpa=False):
-        kHxc = get_K(self.fxc, self.Lpq, rpa=use_rpa)
+        kHxc = get_K(self.Lpq, fxc=self.fxc, rpa=use_rpa)
         return kHxc
 
     def get_M(self, kHxc=None, use_rpa=False):
