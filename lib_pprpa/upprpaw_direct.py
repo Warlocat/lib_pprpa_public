@@ -1,13 +1,11 @@
 import numpy
 import scipy
 import scipy.linalg
-from scipy.sparse.linalg import spsolve
-from scipy.sparse import csc_matrix
 
 from lib_pprpa.upprpa_direct import UppRPA_direct
 from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector
 from lib_pprpa.upprpa_direct import upprpa_orthonormalize_eigenvector, _pprpa_print_eigenvector
-from lib_pprpa.pprpa_util import inner_product, get_chemical_potential, start_clock, stop_clock
+from lib_pprpa.pprpa_util import get_chemical_potential, start_clock, stop_clock
 from lib_pprpa.gsc import mo_energy_gsc2
 
 
@@ -40,7 +38,7 @@ def diagonalize_pprpa_subspace_same_spin(nocc, mo_energy, w_mat, mu=None,
         nvir_act = nvir
     else:
         nvir_act = min(nvir, nvir_act)
-    
+
     if mu is None:
         mu = get_chemical_potential(nocc=nocc, mo_energy=mo_energy)
 
@@ -113,7 +111,7 @@ def diagonalize_pprpa_subspace_same_spin(nocc, mo_energy, w_mat, mu=None,
     return exci, xy, ec
 
 
-def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None, 
+def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None,
                                          active=[(None,None),(None,None)]):
     """Diagonalize ppRPA matrix in subspace (alpha beta, alpha, beta).
 
@@ -135,7 +133,7 @@ def diagonalize_pprpa_subspace_diff_spin(nocc, mo_energy, w_mat, mu=None,
     nvir = (nmo[0]-nocc[0], nmo[1]-nocc[1])
     if mu is None:
         mu = get_chemical_potential(nocc, mo_energy)
-    
+
     act_alpha, act_beta = active
     nocc_act = [act_alpha[0], act_beta[0]]
     nvir_act = [act_alpha[1], act_beta[1]]
@@ -204,39 +202,40 @@ def get_K(Lpq, fxc=None, rpa=False):
 
     Args:
         Lpq (list of double ndarray): three-center RI matrices in MO space.
-        fxc (list of numpy.ndarray): exchange-correlation kernel, 
+        fxc (list of numpy.ndarray): exchange-correlation kernel,
             [aaaa, bbbb, aabb].
         rpa (bool): whether to include exchange-correlation kernel.
 
     Returns:
         k_hxc (list of numpy.ndarray): Hartree-exchange-correlation kernel
-            matrix in MO basis, [aaaa, bbbb, aabb]. 
+            matrix in MO basis, [aaaa, bbbb, aabb].
             bbaa = aabb.transpose(2,3,0,1)
     """
-    if rpa == False:
+    if rpa is False:
         assert fxc is not None
+
     # aaaa
-    pqrs = numpy.einsum('Ppq,Psr->pqrs', Lpq[0], Lpq[0], optimize=True)
-    kaa_hxc = pqrs if rpa else (fxc[0] + pqrs)
+    pqrs = numpy.einsum('Lpq,Lsr->pqrs', Lpq[0], Lpq[0], optimize=True)
+    kaa_hxc = pqrs if rpa else fxc[0] + pqrs
 
     # bbbb
-    pqrs = numpy.einsum('Ppq,Psr->pqrs', Lpq[1], Lpq[1], optimize=True)
-    kbb_hxc = pqrs if rpa else (fxc[1] + pqrs)
+    pqrs = numpy.einsum('Lpq,Lsr->pqrs', Lpq[1], Lpq[1], optimize=True)
+    kbb_hxc = pqrs if rpa else fxc[1] + pqrs
 
     # aabb
-    pqrs = numpy.einsum('Ppq,Psr->pqrs', Lpq[0], Lpq[1], optimize=True)
-    kab_hxc = pqrs if rpa else (fxc[2] + pqrs)
+    pqrs = numpy.einsum('Lpq,Lsr->pqrs', Lpq[0], Lpq[1], optimize=True)
+    kab_hxc = pqrs if rpa else fxc[2] + pqrs
 
     return kaa_hxc, kbb_hxc, kab_hxc
 
 
 def get_M(k_hxc, mo_energy, nmo, nocc):
     """Construct M matrix,
-    as defined in J. Phys. Chem. Lett. 2021, 12, 7236−7244, Equation (19).
+    as defined in J. Phys. Chem. Lett. 2021, 12, 7236-7244, Equation (19).
 
     Args:
         k_hxc (list of numpy.ndarray): Hartree-exchange-correlation kernel
-            matrix in MO basis, [aaaa, bbbb, aabb]. 
+            matrix in MO basis, [aaaa, bbbb, aabb].
             bbaa = aabb.transpose(2,3,0,1)
         mo_energy (list of numpy.ndarray): AO-to-MO coefficients, (alpha, beta).
         nmo (list of int): number of MOs.
@@ -247,27 +246,24 @@ def get_M(k_hxc, mo_energy, nmo, nocc):
     """
     if isinstance(nmo, int):
         nmo = (nmo, nmo)
-    nvir = (nmo[0]-nocc[0], nmo[1]-nocc[1])
+    nvir = (nmo[0] - nocc[0], nmo[1] - nocc[1])
     k_iajb = [k_hxc[0][:nocc[0], nocc[0]:, :nocc[0], nocc[0]:], # aaaa
               k_hxc[1][:nocc[1], nocc[1]:, :nocc[1], nocc[1]:], # bbbb
               k_hxc[2][:nocc[0], nocc[0]:, :nocc[1], nocc[1]:], # aabb
               k_hxc[2][:nocc[0], nocc[0]:, \
                 :nocc[1], nocc[1]:].transpose(2,3,0,1) # bbaa
               ]
-    k_iajb[0] = k_iajb[0].reshape(nocc[0]*nvir[0], nocc[0]*nvir[0]) * 2
-    k_iajb[1] = k_iajb[1].reshape(nocc[1]*nvir[1], nocc[1]*nvir[1]) * 2
-    k_iajb[2] = k_iajb[2].reshape(nocc[0]*nvir[0], nocc[1]*nvir[1]) * 2
-    k_iajb[3] = k_iajb[3].reshape(nocc[1]*nvir[1], nocc[0]*nvir[0]) * 2
+    k_iajb[0] = k_iajb[0].reshape(nocc[0] * nvir[0], nocc[0] * nvir[0]) * 2
+    k_iajb[1] = k_iajb[1].reshape(nocc[1] * nvir[1], nocc[1] * nvir[1]) * 2
+    k_iajb[2] = k_iajb[2].reshape(nocc[0] * nvir[0], nocc[1] * nvir[1]) * 2
+    k_iajb[3] = k_iajb[3].reshape(nocc[1] * nvir[1], nocc[0] * nvir[0]) * 2
 
-    for i in range(nocc[0]):
-        for a in range(nvir[0]):
-            k_iajb[0][a + i*nvir[0], a + i*nvir[0]] +=\
-                 mo_energy[0][a + nocc[0]] - mo_energy[0][i]
+    # orbital energy contribution
+    orb_diff = mo_energy[0][None, nocc[0] :] - mo_energy[0][: nocc[0], None]
+    numpy.fill_diagonal(k_iajb[0], k_iajb[0].diagonal() + orb_diff.reshape(-1))
 
-    for i in range(nocc[1]):
-        for a in range(nvir[1]):
-            k_iajb[1][a + i*nvir[1], a + i*nvir[1]] +=\
-                 mo_energy[1][a + nocc[1]] - mo_energy[1][i]
+    orb_diff = mo_energy[1][None, nocc[1] :] - mo_energy[1][: nocc[1], None]
+    numpy.fill_diagonal(k_iajb[1], k_iajb[1].diagonal() + orb_diff.reshape(-1))
 
     m_upper = numpy.concatenate((k_iajb[0], k_iajb[2]), axis=1)
     m_lower = numpy.concatenate((k_iajb[3], k_iajb[1]), axis=1)
@@ -277,12 +273,12 @@ def get_M(k_hxc, mo_energy, nmo, nocc):
 
 
 def get_W(k_hxc, m_mat, nmo, nocc, no_screening=False):
-    """Calculate W matrix as defined in 
-    J. Phys. Chem. Lett. 2021, 12, 7236−7244, Equation (14).
+    """Calculate W matrix as defined in
+    J. Phys. Chem. Lett. 2021, 12, 7236-7244, Equation (14).
 
     Args:
         k_hxc (list of numpy.ndarray): Hartree-exchange-correlation kernel
-            matrix in MO basis, [aaaa, bbbb, aabb]. 
+            matrix in MO basis, [aaaa, bbbb, aabb].
             bbaa = aabb.transpose(2,3,0,1)
         m_mat (numpy.ndarray): M matrix.
         nmo (list of int): number of MOs.
@@ -293,7 +289,7 @@ def get_W(k_hxc, m_mat, nmo, nocc, no_screening=False):
     """
     if isinstance(nmo, int):
         nmo = (nmo, nmo)
-    nvir = (nmo[0]-nocc[0], nmo[1]-nocc[1])
+    nvir = (nmo[0] - nocc[0], nmo[1] - nocc[1])
     cond_number = numpy.linalg.cond(m_mat)
     print(f"M matrix Condition number: {cond_number}")
     if cond_number < 1e12:  # Threshold for well-conditioned matrix
@@ -301,23 +297,20 @@ def get_W(k_hxc, m_mat, nmo, nocc, no_screening=False):
     else:
         print("Matrix is ill-conditioned.")
     m_inv = numpy.linalg.inv(m_mat)
-    k_pria = [k_hxc[0][:, :, :nocc[0], nocc[0]:], # aaaa
-              k_hxc[1][:, :, :nocc[1], nocc[1]:], # bbbb
-              k_hxc[2][:, :, :nocc[1], nocc[1]:], # aabb
-              k_hxc[2].transpose(2,3,0,1)[:, :, :nocc[0], nocc[0]:], # bbaa
-             ]
-    k_prai = [k_hxc[0][:, :, nocc[0]:, :nocc[0]], # aaaa
-              k_hxc[1][:, :, nocc[1]:, :nocc[1]], # bbbb
-              k_hxc[2][:, :, nocc[1]:, :nocc[1]], # aabb
-              k_hxc[2].transpose(2,3,0,1)[:, :, nocc[0]:, :nocc[0]], # bbaa
-             ]
+
+    k_pria = [
+        k_hxc[0][:, :, : nocc[0], nocc[0] :],  # aaaa
+        k_hxc[1][:, :, : nocc[1], nocc[1] :],  # bbbb
+        k_hxc[2][:, :, : nocc[1], nocc[1] :],  # aabb
+        k_hxc[2].transpose(2, 3, 0, 1)[:, :, : nocc[0], nocc[0] :],  # bbaa
+    ]
 
     K_upper = numpy.concatenate((
-        k_pria[0].reshape(nmo[0]*nmo[0], nocc[0]*nvir[0]), 
+        k_pria[0].reshape(nmo[0]*nmo[0], nocc[0]*nvir[0]),
         k_pria[2].reshape(nmo[0]*nmo[0], nocc[1]*nvir[1])), axis=1) * 2
 
     K_lower = numpy.concatenate((
-        k_pria[3].reshape(nmo[1]*nmo[1], nocc[0]*nvir[0]), 
+        k_pria[3].reshape(nmo[1]*nmo[1], nocc[0]*nvir[0]),
         k_pria[1].reshape(nmo[1]*nmo[1], nocc[1]*nvir[1])), axis=1) * 2
 
     K_mat1 = numpy.concatenate((K_upper, K_lower), axis=0).copy()
@@ -326,10 +319,10 @@ def get_W(k_hxc, m_mat, nmo, nocc, no_screening=False):
     for mat in k_pria:
         k_jbsq.append(mat.transpose(2,3,0,1))
     K_upper = numpy.concatenate((
-        k_jbsq[0].reshape(nocc[0]*nvir[0], nmo[0]*nmo[0]), 
+        k_jbsq[0].reshape(nocc[0]*nvir[0], nmo[0]*nmo[0]),
         k_jbsq[2].reshape(nocc[1]*nvir[1], nmo[0]*nmo[0])), axis=0)
     K_lower = numpy.concatenate((
-        k_jbsq[3].reshape(nocc[0]*nvir[0], nmo[1]*nmo[1]), 
+        k_jbsq[3].reshape(nocc[0]*nvir[0], nmo[1]*nmo[1]),
         k_jbsq[1].reshape(nocc[1]*nvir[1], nmo[1]*nmo[1])), axis=0)
     K_mat2 = numpy.concatenate((K_upper, K_lower), axis=1).copy()
 
@@ -455,8 +448,8 @@ def _analyze_upprpaw_direct(exci, xy, nocc, nvir, nelec='n-2', print_thresh=0.1,
 
 class UppRPAwDirect(UppRPA_direct):
     def __init__(
-            self, nocc, mo_energy, Lpq, fxc=None, hh_state=5, pp_state=5, 
-            nelec='n-2', active=[None, None], print_thresh=0.1, 
+            self, nocc, mo_energy, Lpq, fxc=None, hh_state=5, pp_state=5,
+            nelec='n-2', active=[None, None], print_thresh=0.1,
             with_screening = True,
             use_rpa4='none' # avail: 'response', 'all', 'none'
             ):
@@ -477,7 +470,7 @@ class UppRPAwDirect(UppRPA_direct):
         if kHxc == None:
             kHxc=self.get_K(use_rpa=use_rpa)
         return get_M(kHxc, self.mo_energy, self.nmo, self.nocc)
-    
+
     def get_W(self):
         use_rpa4 = self.use_rpa4
         if use_rpa4 == 'none':
@@ -493,7 +486,7 @@ class UppRPAwDirect(UppRPA_direct):
             raise NotImplementedError
 
         no_screening = not self.with_screening
-        self.w_mat = get_W(kHxc, m_mat, self.nmo, self.nocc, 
+        self.w_mat = get_W(kHxc, m_mat, self.nmo, self.nocc,
                            no_screening=no_screening)
         return self.w_mat
 
@@ -566,7 +559,7 @@ class UppRPAwDirect(UppRPA_direct):
         nvir = nvir_act
         nmo = [nocc[0] + nvir[0], nocc[1] + nvir[1]]
         _analyze_upprpaw_direct(
-            self.exci, self.xy, nocc, nvir, 
+            self.exci, self.xy, nocc, nvir,
             nelec=self.nelec,
             print_thresh=self.print_thresh, hh_state=self.hh_state,
             pp_state=self.pp_state, nocc_fro=nocc_fro
@@ -656,6 +649,3 @@ class UppRPAwDirect(UppRPA_direct):
         else:
             print("U-ppRPAW needs at least %.1f GB memory." % (mem / 1.0e3))
         return
-
-
-

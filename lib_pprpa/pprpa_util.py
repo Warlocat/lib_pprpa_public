@@ -85,6 +85,7 @@ def get_chemical_potential(nocc, mo_energy):
 
     return mu
 
+
 def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act, mo_dip=None):
     """Get basic input in active space.
 
@@ -116,6 +117,7 @@ def get_pprpa_input_act(nocc, mo_energy, Lpq, nocc_act, nvir_act, mo_dip=None):
         return nocc_act, mo_energy_act, Lpq_act, mo_dip_act
     else:
         return nocc_act, mo_energy_act, Lpq_act
+
 
 def print_citation():
     __version__ = "0.1"

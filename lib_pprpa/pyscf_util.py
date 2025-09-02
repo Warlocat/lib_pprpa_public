@@ -6,7 +6,7 @@ import scipy
 import pyscf
 import pyscf.dft
 from pyscf.lib import unpack_tril
-from pyscf import df
+from pyscf import df, lib
 from pyscf.ao2mo import _ao2mo
 
 from lib_pprpa.analyze import get_pprpa_nto, get_pprpa_dm
@@ -1006,82 +1006,102 @@ def create_frac_scf_object(mf, frac_spin, frac_orb, frac_occ):
     return frac_mf
 
 
-def get_fxc_r(mf):
-    """Calculate fxc matrix in orbital space.
+def get_fxc_r_st(mf, multi, nocc_act=None, nvir_act=None):
+    """Calculate spin-adapted fxc matrix in orbital space.
 
-    Args:
-        mf (pyscf.dft.RKS): pyscf restricted KS-DFT object.
+    Parameters
+    ----------
+    mf : pyscf.dft.rks.RKS
+        restricted DFT object
+    multi : str
+        multiplicity
+    nocc_act : int, optional
+        number of active occupied orbitals, by default None
+    nvir_act : int, optional
+        number of active virtual orbitals, by default None
 
-    Returns:
-        fxc_mat (numpy.ndarray): fxc matrix in orbital space.
+    Returns
+    -------
+    fxc_mat : numpy.ndarray
+        spin-adapted fxc matrix in orbital space
     """
-    import pyscf
     dm0 = mf.make_rdm1(mf.mo_coeff, mf.mo_occ)
     ni = mf._numint
     make_rho = ni._gen_rho_evaluator(mf.mol, dm0, hermi=1, with_lapl=False)[0]
     xctype = ni._xc_type(mf.xc)
-    mem_now = pyscf.lib.current_memory()[0]
+    mem_now = lib.current_memory()[0]
     max_memory = max(2000, mf.max_memory * 0.8 - mem_now)
 
-    mo_coeff = mf.mo_coeff
-    nao = mo_coeff.shape[0]
-    nmo = mo_coeff.shape[1]
+    nao = mf.mo_coeff.shape[0]
+    nmo = mf.mo_coeff.shape[1]
+    nocc = int(numpy.sum(mf.mo_occ) // 2)
+    nvir = nmo - nocc
 
-    fxc_mat = numpy.zeros((nmo, nmo, nmo, nmo))
+    # determine active-space size
+    nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
+    nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
+    nmo_act = nocc_act + nvir_act
+    mo_coeff_act = numpy.ascontiguousarray(mf.mo_coeff[:, nocc - nocc_act : nocc + nvir_act])
+
+    fxc_mat = numpy.zeros(shape=[nmo_act, nmo_act, nmo_act, nmo_act], dtype=numpy.double)
     if xctype == 'LDA':
         ao_deriv = 0
-        for ao, mask, weight, coords \
-                in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
+        for ao, mask, weight, _ in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
             rho = make_rho(0, ao, mask, xctype)
-            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
-            wfxc = fxc[0, 0] * weight
+            rho *= .5
+            rho = numpy.repeat(rho[numpy.newaxis], 2, axis=0)
+            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype, spin=1)[2]
 
-            mo_value = numpy.einsum('rm,mp->rp', ao, mo_coeff, optimize=True)
-            rho_value = numpy.einsum(
-                'rp,rq->rpq', mo_value, mo_value, optimize=True)
-            w_rho = numpy.einsum('rpq,r->rpq', rho_value, wfxc, optimize=True)
-            w = numpy.einsum(
-                'rpq,rmn->pqmn', rho_value, w_rho, optimize=True) * 2
-            fxc_mat += w
+            if multi == "s":
+                wfxc = (fxc[0, :, 0] + fxc[0, :, 1]) * weight
+            else:
+                wfxc = (fxc[0, :, 0] - fxc[0, :, 1]) * weight
 
+            mo_value = numpy.einsum("rm,mp->rp", ao, mo_coeff_act, optimize=True)
+            rho_value = numpy.einsum("rp,rq->rpq", mo_value, mo_value, optimize=True)
+            w_rho = numpy.einsum("rpq,r->rpq", rho_value, wfxc, optimize=True)
+            fxc_mat += numpy.einsum("rpq,rmn->pqmn", rho_value, w_rho, optimize=True) * 2
     elif xctype == 'GGA':
         ao_deriv = 1
-        for ao, mask, weight, coords \
-                in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
+        for ao, mask, weight, _ in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
             rho = make_rho(0, ao, mask, xctype)
-            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
-            wfxc = fxc * weight
-            mo_value = numpy.einsum('xrm,mp->xrp', ao, mo_coeff, optimize=True)
-            rho_value = numpy.einsum(
-                'xrp,rq->xrpq', mo_value, mo_value[0], optimize=True)
-            rho_value[1:4] += numpy.einsum(
-                'rp,xrq->xrpq', mo_value[0], mo_value[1:4], optimize=True)
-            w_rho = numpy.einsum(
-                'xyr,xrpq->yrpq', wfxc, rho_value, optimize=True)
-            w = numpy.einsum('xrpq,xrmn->pqmn', w_rho, rho_value, optimize=True)
-            fxc_mat += w
+            rho *= 0.5
+            rho = numpy.repeat(rho[numpy.newaxis], 2, axis=0)
 
+            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype, spin=1)[2]
+            if multi == "s":
+                wfxc = (fxc[0, :, 0] + fxc[0, :, 1]) * weight
+            else:
+                wfxc = (fxc[0, :, 0] - fxc[0, :, 1]) * weight
+
+            mo_value = numpy.einsum("xrm,mp->xrp", ao, mo_coeff_act, optimize=True)
+            rho_value = numpy.einsum("xrp,rq->xrpq", mo_value, mo_value[0], optimize=True)
+            rho_value[1:4] += numpy.einsum("rp,xrq->xrpq", mo_value[0], mo_value[1:4], optimize=True)
+            w_rho = numpy.einsum("xyr,xrpq->yrpq", wfxc, rho_value, optimize=True)
+            fxc_mat += numpy.einsum("xrpq,xrmn->pqmn", w_rho, rho_value, optimize=True)
     elif xctype == 'MGGA':
         ao_deriv = 1
-        for ao, mask, weight, coords \
-            in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
+        for ao, mask, weight, _ in ni.block_loop(mf.mol, mf.grids, nao, ao_deriv, max_memory):
             rho = make_rho(0, ao, mask, xctype)
-            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype)[2]
-            wfxc = fxc * weight
-            mo_value = numpy.einsum('xrm,mp->xrp', ao, mo_coeff, optimize=True)
-            rho_value = numpy.einsum(
-                'xrp,rq->xrpq', mo_value, mo_value[0], optimize=True)
-            rho_value[1:4] += numpy.einsum(
-                'rp,xrq->xrpq', mo_value[0], mo_value[1:4], optimize=True)
-            tau_value = numpy.einsum(
-                'xrp,xrq->rpq', mo_value[1:4], mo_value[1:4], optimize=True) * .5
+            rho *= .5
+            rho = numpy.repeat(rho[numpy.newaxis], 2, axis=0)
+
+            fxc = ni.eval_xc_eff(mf.xc, rho, deriv=2, xctype=xctype, spin=1)[2]
+            if multi == "s":
+                wfxc = (fxc[0, :, 0] + fxc[0, :, 1]) * weight
+            else:
+                wfxc = (fxc[0, :, 0] - fxc[0, :, 1]) * weight
+
+            mo_value = numpy.einsum("xrm,mp->xrp", ao, mo_coeff_act, optimize=True)
+            rho_value = numpy.einsum("xrp,rq->xrpq", mo_value, mo_value[0], optimize=True)
+            rho_value[1:4] += numpy.einsum("rp,xrq->xrpq", mo_value[0], mo_value[1:4], optimize=True)
+            tau_value = numpy.einsum("xrp,xrq->rpq", mo_value[1:4], mo_value[1:4], optimize=True) * 0.5
             rho_value = numpy.vstack([rho_value, tau_value[numpy.newaxis]])
-            w_ov = numpy.einsum(
-                'xyr,xrpq->yrpq', wfxc, rho_value, optimize=True)
-            fxc_mat += numpy.einsum(
-                'xrpq,xrmn->pqmn', w_ov, rho_value, optimize=True) * 2
+            w_ov = numpy.einsum("xyr,xrpq->yrpq", wfxc, rho_value, optimize=True)
+            fxc_mat += numpy.einsum("xrpq,xrmn->pqmn", w_ov, rho_value, optimize=True) * 2
 
     return fxc_mat
+
 
 
 def get_fxc_u(mf, Lpq=None, nocc_act=None, nvir_act=None, add_frac_e=True):

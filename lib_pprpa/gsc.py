@@ -35,7 +35,7 @@ def mo_energy_gsc2(mf, w_mat, nocc_act=None, nvir_act=None, rpa=False):
     mo_energy_act = [
         mo_energy[0, (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])],
         mo_energy[1, (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])]]
-    
+
     mo_occ_act = [
         mo_occ[0, (nocc[0]-nocc_act[0]):(nocc[0]+nvir_act[0])],
         mo_occ[1, (nocc[1]-nocc_act[1]):(nocc[1]+nvir_act[1])]]
@@ -55,3 +55,6 @@ def mo_energy_gsc2(mf, w_mat, nocc_act=None, nvir_act=None, rpa=False):
                      mo_energy_act[1] + delta_mo_eb]
 
     return mo_energy_act
+
+
+
