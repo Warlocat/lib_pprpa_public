@@ -557,6 +557,7 @@ class ppRPA_direct():
         return
 
     def save_pprpa(self, fn):
+        fn += ".h5" if not fn.endswith(".h5") else ""
         print("\nsave pprpa results to %s.\n" % fn)
         f = h5py.File(fn, "w")
         f["nocc"] = numpy.asarray(self.nocc)

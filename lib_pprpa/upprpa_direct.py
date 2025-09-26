@@ -490,6 +490,7 @@ class UppRPA_direct():
 
     def save_pprpa(self, fn):
         assert self.exci is not None
+        fn += '.h5' if not fn.endswith('.h5') else ''
         print('\nsave U-ppRPA results to %s.\n' % fn)
         f = h5py.File(fn, 'w')
         f['nocc_alpha'] = numpy.asarray(self.nocc[0])
