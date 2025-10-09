@@ -997,3 +997,29 @@ def _write_dump_file(filename, nocc, mo_energy, Lpq, mo_dip=None):
         if mo_dip is not None:
             f["mo_dipole"] = numpy.asarray(mo_dip)
     print("Saved h5py file = %-s" % filename)
+
+def read_dump_file(filename: str, with_dip: bool = False):
+    """Read ppRPA inputs from a file.
+    Args:
+        filename (str): name of the file to dump matrices for lib_pprpa.
+        with_dip (bool, optional): whether to read dipole integrals.
+            Defaults to False.
+    returns:
+        nocc (numpy.ndarray): number of occupied orbitals in the active space.
+        mo_energy (numpy.ndarray): orbital energies in the active space.
+        Lpq (numpy.ndarray): three-center density fitting matrix
+            in the active MO space.
+        mo_dip (numpy.ndarray, optional): Dipole integrals in MO space.
+            Only returned if with_dip is True.
+    """
+    filename += ".h5" if not filename.endswith(".h5") else ""
+    with h5py.File(name=filename, mode="r") as f:
+        nocc = numpy.asarray(f["nocc"])
+        mo_energy = numpy.asarray(f["mo_energy"])
+        Lpq = numpy.asarray(f["Lpq"])
+        if "mo_dipole" in f.keys() and with_dip:
+            mo_dip = numpy.asarray(f["mo_dipole"])
+            return nocc, mo_energy, Lpq, mo_dip
+        elif with_dip:
+            raise KeyError("The requested dipole integrals were not in the file.")
+        return nocc, mo_energy, Lpq
