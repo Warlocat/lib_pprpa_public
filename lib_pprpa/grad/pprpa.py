@@ -211,14 +211,7 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
     orbi = mf.mo_coeff[:, slice_i]
     orba = mf.mo_coeff[:, slice_a]
     occ_y_mat, vir_x_mat = get_xy_full(xy, oo_dim, mult)
-    if pprpa._use_eri:
-        _, mo_ene_full, eri_full = pyscf_util.get_pyscf_input_mol_eri_r(mf, return_raw=True)
-        eri_oo = np.ascontiguousarray(eri_full[:, slice_p, slice_i, slice_i])
-        eri_vv = np.ascontiguousarray(eri_full[:, slice_p, slice_a, slice_a])
-        eri_full = None
-        X_eri = np.matmul(eri_vv.reshape(-1, nvir*nvir), vir_x_mat.reshape(-1)).reshape(-1, nocc+nvir)
-        Y_eri = np.matmul(eri_oo.reshape(-1, nocc*nocc), occ_y_mat.reshape(-1)).reshape(-1, nocc+nvir)
-    elif pprpa._ao_direct:
+    if pprpa._use_eri or pprpa._ao_direct:
         hermi = 1 if mult == 's' else 2
         mo_ene_full = mf.mo_energy
         X_ao = orba @ vir_x_mat @ orba.T

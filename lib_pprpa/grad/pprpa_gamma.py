@@ -4,6 +4,7 @@ from functools import reduce
 from pyscf import lib
 from pyscf.lib import logger
 from lib_pprpa.grad.pprpa import Gradients as pprpa_grad
+from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from pyscf.pbc.gto.pseudo import pp_int
 from lib_pprpa.pprpa_util import start_clock, stop_clock
 from lib_pprpa.grad.grad_utils import _contract_xc_kernel_krks, get_veff_krks, get_xy_full
@@ -114,179 +115,6 @@ def rhf_to_krhf(myrhf):
     return mykrhf
 
 
-def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20, cphf_conv_tol=1.0e-8):
-    r"""Calculate relaxed density matrix (and the I intermediates)
-        for given pprpa and mean-field object.
-    Args:
-        pprpa: a pprpa object.
-        mf: a mean-field RHF/RKS object.
-    Returns:
-        den_relaxed: the relaxed one-particle density matrix (nmo_full, nmo_full)
-        i_int: the I intermediates (nmo_full, nmo_full)
-        Both are in the MO basis.
-    """
-    assert mult in ['t', 's'], 'mult = {}. is not valid in make_rdm1_relaxed_pprpa'.format(mult)
-    from lib_pprpa import pyscf_util
-    from lib_pprpa.grad.grad_utils import choose_slice, choose_range, contraction_2rdm_Lpq, \
-                           contraction_2rdm_eri, get_xy_full, make_rdm1_unrelaxed_from_xy_full
-
-    if xy is None:
-        if mult == 's':
-            xy = pprpa.xy_s[istate]
-        else:
-            xy = pprpa.xy_t[istate]
-    nocc_all = mf.mol.nelectron // 2
-    nvir_all = mf.mol.nao - nocc_all
-    nocc = pprpa.nocc
-    nvir = pprpa.nvir
-    nfrozen_occ = nocc_all - nocc
-    nfrozen_vir = nvir_all - nvir
-    if mult == 's':
-        oo_dim = (nocc + 1) * nocc // 2
-    else:
-        oo_dim = (nocc - 1) * nocc // 2
-
-    # create slices
-    slice_p = choose_slice('p', nfrozen_occ, nocc, nvir, nfrozen_vir)  # all active
-    slice_i = choose_slice('i', nfrozen_occ, nocc, nvir, nfrozen_vir)  # active occupied
-    slice_a = choose_slice('a', nfrozen_occ, nocc, nvir, nfrozen_vir)  # active virtual
-    slice_ip = choose_slice('ip', nfrozen_occ, nocc, nvir, nfrozen_vir)  # frozen occupied
-    slice_ap = choose_slice('ap', nfrozen_occ, nocc, nvir, nfrozen_vir)  # frozen virtual
-    slice_I = choose_slice('I', nfrozen_occ, nocc, nvir, nfrozen_vir)  # all occupied
-    slice_A = choose_slice('A', nfrozen_occ, nocc, nvir, nfrozen_vir)  # all virtual
-
-    orbA = mf.mo_coeff[:, slice_A]
-    orbI = mf.mo_coeff[:, slice_I]
-    orbp = mf.mo_coeff[:, slice_p]
-    orbi = mf.mo_coeff[:, slice_i]
-    orba = mf.mo_coeff[:, slice_a]
-    occ_y_mat, vir_x_mat = get_xy_full(xy, oo_dim, mult)
-    if pprpa._use_eri or pprpa._ao_direct:
-        hermi = 1 if mult == 's' else 2
-        mo_ene_full = mf.mo_energy
-        X_ao = orba @ vir_x_mat @ orba.T
-        X_eri = mf.get_k(dm=X_ao, hermi=hermi)
-        X_eri = mf.mo_coeff.T @ X_eri @ orbp
-        Y_ao = orbi @ occ_y_mat @ orbi.T
-        Y_eri = mf.get_k(dm=Y_ao, hermi=hermi)
-        Y_eri = mf.mo_coeff.T @ Y_eri @ orbp
-    else:
-        raise NotImplementedError("Lpq based contraction is not supported yet in pprpa_gamma gradient.")
-
-    # set singlet=None, generate function for CPHF type response kernel
-    vresp = mf.gen_response(singlet=None, hermi=1)
-    den_u = make_rdm1_unrelaxed_from_xy_full(occ_y_mat, vir_x_mat)
-    den_u_ao = np.einsum('pi,i,qi->pq', orbp, den_u, orbp, optimize=True)
-    veff_den_u = reduce(np.dot, (mf.mo_coeff.T, vresp(den_u_ao) * 2, mf.mo_coeff))
-
-    start_clock('Calculate i_prime and i_prime_prime')
-    # calculate I' first
-    i_prime = np.zeros((len(mo_ene_full), len(mo_ene_full)), dtype=occ_y_mat.dtype)
-    # I' active-active block
-    if not pprpa._use_eri and not pprpa._ao_direct:
-        raise NotImplementedError("Lpq based contraction is not supported yet in pprpa_gamma gradient.")
-    else:
-        i_prime[slice_p, slice_p] += contraction_2rdm_eri(
-            occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
-        )
-    i_prime[slice_a, slice_i] += veff_den_u[slice_a, slice_i]
-    for p in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
-        i_prime[p, p] += mo_ene_full[p] * den_u[p - nfrozen_occ]
-
-    if nfrozen_vir > 0:
-        # I' frozen virtual-active block
-        if not pprpa._use_eri and not pprpa._ao_direct:
-            raise NotImplementedError("Lpq based contraction is not supported yet in pprpa_gamma gradient.")
-        else:
-            i_prime[slice_ap, slice_p] += contraction_2rdm_eri(
-                occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
-            )
-        i_prime[slice_ap, slice_i] += veff_den_u[slice_ap, slice_i]
-    if nfrozen_occ > 0:
-        # I' frozen occupied-active block
-        if not pprpa._use_eri and not pprpa._ao_direct:
-            raise NotImplementedError("Lpq based contraction is not supported yet in pprpa_gamma gradient.")
-        else:
-            i_prime[slice_ip, slice_p] += contraction_2rdm_eri(
-                occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
-            )
-        # I' all virtual-frozen occupied block
-        i_prime[slice_A, slice_ip] += veff_den_u[slice_A, slice_ip]
-
-    # calculate I'' next
-    i_prime_prime = np.zeros_like(i_prime)
-    # I'' active virtual-all occupied block
-    i_prime_prime[slice_a, slice_I] = i_prime[slice_a, slice_I] - i_prime[slice_I, slice_a].T
-    # I'' = I' blocks
-    i_prime_prime[slice_A, slice_a] = i_prime[slice_A, slice_a]
-    i_prime_prime[slice_I, slice_i] = i_prime[slice_I, slice_i]
-    i_prime_prime[slice_ap, slice_I] = i_prime[slice_ap, slice_I]
-    stop_clock('Calculate i_prime and i_prime_prime')
-
-    start_clock('Calculate d_prime')
-    d_prime = np.zeros_like(i_prime_prime)
-    threshold = 1.0e-6
-    # D' all occupied-active occupied block
-    for i in choose_range('I', nfrozen_occ, nocc, nvir, nfrozen_vir):
-        for j in choose_range('i', nfrozen_occ, nocc, nvir, nfrozen_vir):
-            denorm = mo_ene_full[j] - mo_ene_full[i]
-            factor = 1.0 / denorm if abs(denorm) >= threshold else 0.0
-            d_prime[i, j] = factor * i_prime_prime[i, j]
-
-    # D' all virtual-active virtual block
-    for a in choose_range('A', nfrozen_occ, nocc, nvir, nfrozen_vir):
-        for b in choose_range('a', nfrozen_occ, nocc, nvir, nfrozen_vir):
-            denorm = mo_ene_full[b] - mo_ene_full[a]
-            factor = 1.0 / denorm if abs(denorm) >= threshold else 0.0
-            d_prime[a, b] = factor * i_prime_prime[a, b]
-
-    x_int = i_prime_prime[slice_A, slice_I].copy()
-    d_ao = reduce(np.dot, (orbI, d_prime[slice_I, slice_i], orbi.T))
-    d_ao += reduce(np.dot, (orbA, d_prime[slice_A, slice_a], orba.T))
-    d_ao += d_ao.T
-    x_int += reduce(np.dot, (orbA.T, vresp(d_ao) * 2, orbI))
-
-    def fvind(x):
-        dm = reduce(np.dot, (orbA, x.reshape(nvir + nfrozen_vir, nocc + nfrozen_occ) * 2, orbI.T))
-        dm = dm + dm.T
-        v1ao = vresp(dm)
-        return reduce(np.dot, (orbA.T, v1ao, orbI)).ravel()
-
-    from pyscf.scf import cphf
-
-    d_prime[slice_A, slice_I] = cphf.solve(
-        fvind, mo_ene_full, mf.mo_occ, x_int, max_cycle=cphf_max_cycle, tol=cphf_conv_tol
-    )[0].reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
-    stop_clock('Calculate d_prime')
-
-    start_clock('Calculate I intermediates')
-    i_int = -np.einsum('qp,p->qp', d_prime, mo_ene_full)
-    # I all occupied-all occupied block
-    dp_ao = reduce(np.dot, (mf.mo_coeff, d_prime, mf.mo_coeff.T))
-    dp_ao = dp_ao + dp_ao.T
-    veff_dp_II = reduce(np.dot, (orbI.T, vresp(dp_ao), orbI))
-    i_int[slice_I, slice_I] -= 0.5 * veff_den_u[slice_I, slice_I]
-    i_int[slice_I, slice_I] -= veff_dp_II
-    # I active virtual-all occupied block
-    i_int[slice_I, slice_a] -= i_prime[slice_I, slice_a]
-
-    # I active-active block extra term
-    for i in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
-        for j in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
-            denorm = mo_ene_full[j] - mo_ene_full[i]
-            if abs(denorm) < threshold:
-                i_int[i, j] -= 0.5 * i_prime[i, j]
-    stop_clock('Calculate I intermediates')
-
-    den_relaxed = d_prime
-    # active-active block
-    for p in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
-        den_relaxed[p, p] += 0.5 * den_u[p - nfrozen_occ]
-    den_relaxed = den_relaxed + den_relaxed.T
-    i_int = i_int + i_int.T
-
-    return den_relaxed, i_int
-
 
 class Gradients(pprpa_grad):
     def __init__(self, pprpa, mf, mult='t', state=0):
@@ -294,6 +122,7 @@ class Gradients(pprpa_grad):
         self.mf = mf
         assert isinstance(mf, scf.rhf.SCF)
         assert len(mf.kpts) == 1 and np.allclose(mf.kpts[0], np.zeros(3)), "Only Gamma-point KSCF is supported in ppRPA gradients."
+        assert pprpa._ao_direct or pprpa._use_eri, "PBC ppRPA gradients require either MO eri or AO direct approach."
         self.base = pprpa
         self.mol = mf.mol
         self.state = state
