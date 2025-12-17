@@ -632,7 +632,7 @@ def _pprpa_expand_space(
         # add a new trial vector
         if len(residue[iroot][abs(residue[iroot]) > residue_thresh]) > 0:
             if pprpa._compact_subspace is False:
-                assert ntri < max_vec, "Davidson expansion failed!"
+                assert ntri <= max_vec, "Davidson expansion failed!"
             inp = inner_product(residue[iroot].conj(), residue[iroot], pprpa.oo_dim).real
             tri_vec_sig[ntri] = 1 if inp > 0 else -1
             tri_vec[ntri] = residue[iroot] / np.sqrt(abs(inp))

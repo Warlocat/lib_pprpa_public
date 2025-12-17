@@ -115,7 +115,6 @@ def rhf_to_krhf(myrhf):
     return mykrhf
 
 
-
 class Gradients(pprpa_grad):
     def __init__(self, pprpa, mf, mult='t', state=0):
         from pyscf.pbc import scf
@@ -125,6 +124,7 @@ class Gradients(pprpa_grad):
         assert pprpa._ao_direct or pprpa._use_eri, "PBC ppRPA gradients require either MO eri or AO direct approach."
         self.base = pprpa
         self.mol = mf.mol
+        self.cell = mf.mol
         self.state = state
         self.verbose = self.mol.verbose
         self.mult = mult
@@ -141,15 +141,8 @@ class Gradients(pprpa_grad):
     def grad_elec(self, xy, mult, atmlst):
         return grad_elec(self, xy, mult, atmlst)
     
-    def optimizer(self, solver='ase'):
-        '''Geometry optimization solver
-        '''
-        solver = solver.lower()
-        if solver == 'ase':
-            from pyscf.geomopt import ase_solver
-            return ase_solver.GeometryOptimizer(self.base)
-        else:
-            raise RuntimeError(f'Optimization solver {solver} not supported')
+    def get_stress(self):
+        raise NotImplementedError('ppRPA stress is not implemented yet.')
 
 Grad = Gradients
 
