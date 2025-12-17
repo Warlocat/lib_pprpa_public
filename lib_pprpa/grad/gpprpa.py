@@ -174,7 +174,7 @@ def make_rdm1_relaxed_ghf_pprpa(pprpa, mf, xy=None, istate=0, cphf_max_cycle=20,
         Both are in the MO basis.
     """
     from lib_pprpa import pyscf_util
-    from lib_pprpa.grad.grad_utils import choose_slice, choose_range, contraction_2rdm_eri, \
+    from lib_pprpa.grad.grad_utils import choose_slice, choose_range, contraction_2rdm_Lpq, \
                            get_xy_full, make_rdm1_unrelaxed_from_xy_full
     from lib_pprpa.pprpa_util import start_clock, stop_clock
 
@@ -221,7 +221,7 @@ def make_rdm1_relaxed_ghf_pprpa(pprpa, mf, xy=None, istate=0, cphf_max_cycle=20,
     # calculate I' first
     i_prime = np.zeros((len(mo_ene_full), len(mo_ene_full)), dtype=occ_y_mat.dtype)
     # I' active-active block
-    i_prime[slice_p, slice_p] += contraction_2rdm_eri(
+    i_prime[slice_p, slice_p] += contraction_2rdm_Lpq(
         occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
     )
     i_prime[slice_a, slice_i] += veff_den_u[slice_a, slice_i]
@@ -230,13 +230,13 @@ def make_rdm1_relaxed_ghf_pprpa(pprpa, mf, xy=None, istate=0, cphf_max_cycle=20,
 
     if nfrozen_vir > 0:
         # I' frozen virtual-active block
-        i_prime[slice_ap, slice_p] += contraction_2rdm_eri(
+        i_prime[slice_ap, slice_p] += contraction_2rdm_Lpq(
             occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
         )
         i_prime[slice_ap, slice_i] += veff_den_u[slice_ap, slice_i]
     if nfrozen_occ > 0:
         # I' frozen occupied-active block
-        i_prime[slice_ip, slice_p] += contraction_2rdm_eri(
+        i_prime[slice_ip, slice_p] += contraction_2rdm_Lpq(
             occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
         )
         # I' all virtual-frozen occupied block

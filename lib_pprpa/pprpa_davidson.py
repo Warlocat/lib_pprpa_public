@@ -12,10 +12,15 @@ from lib_pprpa.pprpa_util import ij2index, inner_product, start_clock, \
 
 def kernel(pprpa):
     # initialize trial vector and product matrix
-    if pprpa._use_Lov:
-        data_type = pprpa.Lpi.dtype
+    if pprpa._use_eri:
+        data_type = pprpa.vvvv.dtype
+    elif pprpa._ao_direct:
+        data_type = np.double
     else:
-        data_type = pprpa.Lpq.dtype
+        if pprpa._use_Lov:
+            data_type = pprpa.Lpi.dtype
+        else:
+            data_type = pprpa.Lpq.dtype
     # the maximum size is max_vec + nroot for compacting
     tri_size = pprpa.max_vec + pprpa.nroot
     tri_vec = np.zeros(
@@ -29,6 +34,8 @@ def kernel(pprpa):
         tri_vec[:ntri], tri_vec_sig[:ntri] = get_identity_trial_vector(
             pprpa=pprpa, ntri=ntri)
     elif pprpa.trial == "subspace":
+        if pprpa._use_eri or pprpa._ao_direct:
+            raise NotImplementedError("subspace init guess not implemented for eri version.")
         tri_vec[:ntri], tri_vec_sig[:ntri] = get_subspace_trial_vector(
             pprpa=pprpa, ntri=ntri, channel=pprpa.channel,
             nocc_sub=pprpa.nocc_sub, nvir_sub=pprpa.nvir_sub)
@@ -239,10 +246,10 @@ def get_subspace_trial_vector(pprpa, ntri, channel=None, nocc_sub=40, nvir_sub=4
     else:
         Lpq_sub = pprpa.Lpq[:, start:end, start:end]
     if pprpa.multi == "s":
-        xy_sub = diagonalize_pprpa_singlet(nocc_sub, mo_energy_sub, Lpq_sub)[1]
+        xy_sub = diagonalize_pprpa_singlet(nocc_sub, mo_energy_sub, Lpq_sub, mu=pprpa.mu)[1]
     else:
         # GppRPA shares the same diagonalization function with triplet ppRPA
-        xy_sub = diagonalize_pprpa_triplet(nocc_sub, mo_energy_sub, Lpq_sub)[1]
+        xy_sub = diagonalize_pprpa_triplet(nocc_sub, mo_energy_sub, Lpq_sub, mu=pprpa.mu)[1]
 
     tri_vec = np.zeros(shape=[ntri, pprpa.full_dim], dtype=xy_sub.dtype)
     if channel == "pp":
@@ -302,52 +309,133 @@ def _pprpa_contraction(pprpa, tri_vec):
     z_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
     z_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
 
-    for ivec in range(ntri):
-        # restore trial vector into full matrix
-        z_oo[tri_row_o, tri_col_o] = tri_vec[ivec][: pprpa.oo_dim]
-        z_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
-        z_vv[tri_row_v, tri_col_v] = tri_vec[ivec][pprpa.oo_dim :]
-        z_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
+    if not pprpa._ao_direct: # Lpq or eri
+        for ivec in range(ntri):
+            # restore trial vector into full matrix
+            z_oo[tri_row_o, tri_col_o] = tri_vec[ivec][: pprpa.oo_dim]
+            z_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+            z_vv[tri_row_v, tri_col_v] = tri_vec[ivec][pprpa.oo_dim :]
+            z_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
 
-        # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
-        Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
-        if pprpa._use_Lov is True:
-            Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
-            Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
-        else:
-            Lpq_z[:, :nocc] = Lpq[:, :, :nocc].reshape(naux * nmo, nocc) @ z_oo.T
-            Lpq_z[:, nocc:] = Lpq[:, :, nocc:].reshape(naux * nmo, nvir) @ z_vv.T
+            if pprpa._use_eri:
+                prod_vv = np.zeros((nvir*nvir, 1))
+                prod_oo = np.zeros((nocc*nocc, 1))
+                if nvir > 0:
+                    prod_vv += np.matmul(pprpa.vvvv.reshape(nvir*nvir, nvir*nvir), z_vv.T.reshape(nvir*nvir, 1))
+                if nocc > 0:
+                    prod_oo += np.matmul(pprpa.oooo.reshape(nocc*nocc, nocc*nocc), z_oo.T.reshape(nocc*nocc, 1))
+                if nvir > 0 and nocc > 0:
+                    prod_vv += np.matmul(pprpa.oovv.reshape(nocc*nocc, nvir*nvir).T, z_oo.T.reshape(nocc*nocc, 1))
+                    prod_oo += np.matmul(pprpa.oovv.reshape(nocc*nocc, nvir*nvir), z_vv.T.reshape(nvir*nvir, 1))
+                prod_vv = prod_vv.reshape(nvir, nvir)
+                prod_oo = prod_oo.reshape(nocc, nocc)
+            else: # use Lpq
+                # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
+                Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
+                if pprpa._use_Lov is True:
+                    Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
+                    Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
+                else:
+                    Lpq_z[:, :nocc] = Lpq[:, :, :nocc].reshape(naux * nmo, nocc) @ z_oo.T
+                    Lpq_z[:, nocc:] = Lpq[:, :, nocc:].reshape(naux * nmo, nvir) @ z_vv.T
 
-        # transpose and reshape for faster multiplication
-        Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
-        Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
-        # NOTE: here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
-        if pprpa._use_Lov is True:
-            prod_oo = Lpq_z[:nocc] @ Lpi.reshape(naux * nmo, nocc)
-        else:
-            prod_oo = Lpq_z[:nocc] @ Lpq[:, :, :nocc].reshape(naux * nmo, nocc)
-        if pprpa.multi == "s":
-            prod_oo += prod_oo.T
-        else:
-            prod_oo -= prod_oo.T
-        # rotate upper-half to lower-half matrix
-        prod_oo = prod_oo.T
-        prod_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+                # transpose and reshape for faster multiplication
+                Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
+                Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
+                # NOTE: here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
+                if pprpa._use_Lov is True:
+                    prod_oo = Lpq_z[:nocc] @ Lpi.reshape(naux * nmo, nocc)
+                else:
+                    prod_oo = Lpq_z[:nocc] @ Lpq[:, :, :nocc].reshape(naux * nmo, nocc)
+                if pprpa._use_Lov is True:
+                    prod_vv = Lpq_z[nocc:] @ Lpa.reshape(naux * nmo, nvir)
+                else:
+                    prod_vv = Lpq_z[nocc:] @ Lpq[:, :, nocc:].reshape(naux * nmo, nvir)
 
-        if pprpa._use_Lov is True:
-            prod_vv = Lpq_z[nocc:] @ Lpa.reshape(naux * nmo, nvir)
-        else:
-            prod_vv = Lpq_z[nocc:] @ Lpq[:, :, nocc:].reshape(naux * nmo, nvir)
-        if pprpa.multi == "s":
-            prod_vv += prod_vv.T
-        else:
-            prod_vv -= prod_vv.T
-        # rotate upper-half to lower-half matrix
-        prod_vv = prod_vv.T
-        prod_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
 
-        mv_prod[ivec][: pprpa.oo_dim] = prod_oo[tri_row_o, tri_col_o]
-        mv_prod[ivec][pprpa.oo_dim :] = prod_vv[tri_row_v, tri_col_v]
+            if pprpa.multi == "s":
+                prod_vv += prod_vv.T
+                prod_oo += prod_oo.T
+            else:
+                prod_vv -= prod_vv.T
+                prod_oo -= prod_oo.T
+            # rotate upper-half to lower-half matrix
+            prod_oo = prod_oo.T
+            prod_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+            prod_vv = prod_vv.T
+            prod_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
+
+            mv_prod[ivec][: pprpa.oo_dim] = prod_oo[tri_row_o, tri_col_o]
+            mv_prod[ivec][pprpa.oo_dim :] = prod_vv[tri_row_v, tri_col_v]
+    else:
+        dms = []
+        assert pprpa._scf is not None, "SCF object is required for eri_ao_direct contraction."
+        from pyscf.pbc.scf.khf import KSCF
+        kscf = isinstance(pprpa._scf, KSCF)
+        if kscf:
+            assert len(pprpa._scf.kpts) == 1 and np.allclose(pprpa._scf.kpts[0], np.zeros(3)), "Only Gamma-point KSCF is supported in ppRPA eri_ao_direct contraction."
+        if pprpa.mo_coeff is None:
+            if kscf:
+                pprpa.mo_coeff = pprpa._scf.mo_coeff[0][:, pprpa._scf.mol.nelectron//2 - nocc : pprpa._scf.mol.nelectron//2 + nvir]
+            else:
+                pprpa.mo_coeff = pprpa._scf.mo_coeff[:, pprpa._scf.mol.nelectron//2 - nocc : pprpa._scf.mol.nelectron//2 + nvir]
+        mo_coeff_o = pprpa.mo_coeff[:, :nocc]
+        mo_coeff_v = pprpa.mo_coeff[:, nocc:]
+        # for real orbitals,
+        # <ab|cd> z_cd = (ac|bd) z_cd = (ac|db) z_cd = C_ma C_rb (mn|rs) C_nc C_sd z_cd
+        # <ij|kl> z_kl = (ik|jl) z_kl = (ik|lj) z_kl = C_mi C_rj (mn|rs) C_nk C_sl z_kl
+        # <ab|ij> z_ij = (ai|bj) z_ij = (ai|jb) z_ij = C_ma C_rb (mn|rs) C_ni C_sj z_ij
+        # <ij|ab> z_ab = (ia|jb) z_ab = (ia|bj) z_ab = C_mi C_rj (mn|rs) C_an C_bs z_ab
+        for ivec in range(ntri):
+            z_oo[tri_row_o, tri_col_o] = tri_vec[ivec][: pprpa.oo_dim]
+            z_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+            z_vv[tri_row_v, tri_col_v] = tri_vec[ivec][pprpa.oo_dim :]
+            z_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
+            if nvir > 0 and nocc > 0:
+                z_vv_ao = mo_coeff_v @ z_vv.T @ mo_coeff_v.T
+                z_oo_ao = mo_coeff_o @ z_oo.T @ mo_coeff_o.T
+                dms.append(z_vv_ao + z_oo_ao)
+            elif nvir > 0:
+                z_vv_ao = mo_coeff_v @ z_vv.T @ mo_coeff_v.T
+                dms.append(z_vv_ao)
+            elif nocc > 0:
+                z_oo_ao = mo_coeff_o @ z_oo.T @ mo_coeff_o.T
+                dms.append(z_oo_ao)
+
+        if not kscf:
+            K_ao = pprpa._scf.get_k(dm=dms, hermi=0)
+        else:
+            K_ao = []
+            for dm in dms:
+                K_ao.append(pprpa._scf.get_k(dm_kpts=[dm], hermi=0)[0])
+            K_ao = np.array(K_ao)
+        if K_ao.ndim == 2: # special case when only one dm
+            K_ao = K_ao.reshape(1, K_ao.shape[0], K_ao.shape[1])
+        for ivec in range(ntri):
+            prod_vv = np.zeros((nvir, nvir))
+            prod_oo = np.zeros((nocc, nocc))
+            if nvir > 0 and nocc > 0:
+                prod_vv += mo_coeff_v.T @ K_ao[ivec] @ mo_coeff_v
+                prod_oo += mo_coeff_o.T @ K_ao[ivec] @ mo_coeff_o
+            elif nvir > 0:
+                prod_vv += mo_coeff_v.T @ K_ao[ivec] @ mo_coeff_v
+            elif nocc > 0:
+                prod_oo += mo_coeff_o.T @ K_ao[ivec] @ mo_coeff_o
+            if pprpa.multi == "s":
+                prod_vv += prod_vv.T
+                prod_oo += prod_oo.T
+            else:
+                prod_vv -= prod_vv.T
+                prod_oo -= prod_oo.T
+            # rotate upper-half to lower-half matrix
+            prod_oo = prod_oo.T
+            prod_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+            prod_vv = prod_vv.T
+            prod_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
+
+            mv_prod[ivec][: pprpa.oo_dim] = prod_oo[tri_row_o, tri_col_o]
+            mv_prod[ivec][pprpa.oo_dim :] = prod_vv[tri_row_v, tri_col_v]
+
 
     # orbital energy contribution
     orb_sum_oo = mo_energy[None, :nocc] + mo_energy[:nocc, None]
@@ -774,10 +862,14 @@ class ppRPA_Davidson():
         self.nocc = nocc  # number of occupied orbitals
         self.mo_energy = np.asarray(mo_energy)  # orbital energy
         # three-center density-fitting matrix in MO space
-        self.Lpq = np.asarray(Lpq)
+        self.Lpq = np.asarray(Lpq) if Lpq is not None else None
         self._use_Lov = False  # use C-contiguous Lpq block for better performance
         self.Lpi = None  # Lpi = Lpq[:, :, :nocc], C-contiguous
         self.Lpa = None  # Lpa = Lpq[:, :, nocc:], C-contiguous
+        self._use_eri = False # use four-index ERI tensor directly
+        self._ao_direct = False # use four-index from fock builder
+        self.mo_coeff = None # molecular orbital coefficients
+        self._scf = None  # SCF object, needed when using eri in AO basis
 
         # options
         self.channel = channel  # channel of desired states, particle-particle or hole-hole
@@ -798,7 +890,7 @@ class ppRPA_Davidson():
         self.mu = None  # chemical potential
         self.nmo = len(self.mo_energy)  # number of orbitals
         self.nvir = self.nmo - self.nocc  # number of virtual orbitals
-        self.naux = Lpq.shape[0]  # number of auxiliary basis functions
+        self.naux = Lpq.shape[0] if Lpq is not None else None  # number of auxiliary basis functions
         self.oo_dim = None  # particle-particle block dimension
         self.vv_dim = None  # hole-hole block dimension
         self.full_dim = None  # full matrix dimension
@@ -845,7 +937,8 @@ class ppRPA_Davidson():
             'multiplicity = %s' %
             ("singlet" if self.multi == "s" else "triplet"))
         print('state channel = %s' % self.channel)
-        print('naux = %d' % self.naux)
+        if self.Lpq is not None:
+            print('naux = %d' % self.naux)
         print('nmo = %d' % self.nmo)
         print('nocc = %d nvir = %d' % (self.nocc, self.nvir))
         print("occ-occ dimension = %d vir-vir dimension = %d"
@@ -867,13 +960,30 @@ class ppRPA_Davidson():
 
     def check_memory(self):
         # intermediate in contraction; mv_prod, tri_vec, xy
-        mem = (
-            self.naux * self.nmo * self.nmo + 3 * self.max_vec * self.full_dim)\
+        if self._use_eri:
+            mem = (self.nocc**4 + self.nvir**4 + self.nocc**2 * self.nvir**2 + \
+                3 * self.max_vec * self.full_dim)\
+                * 8 / 1.0e6
+        elif self._ao_direct:
+            mem = (3 * self.max_vec * self.full_dim)\
+                * 8 / 1.0e6
+        else:
+            mem = (
+                self.naux * self.nmo * self.nmo + 3 * self.max_vec * self.full_dim)\
                 * 8 / 1.0e6
         if mem < 1000:
             print("ppRPA needs at least %d MB memory." % mem)
         else:
             print("ppRPA needs at least %.1f GB memory." % (mem / 1.0e3))
+        return
+    
+    def use_eri(self, eri_vvvv, eri_oovv, eri_oooo):
+        """Use ERI instead of Lpq."""
+        """ERI symmetry <pq|rs>"""
+        self._use_eri = True
+        self.vvvv = np.ascontiguousarray(eri_vvvv)
+        self.oovv = np.ascontiguousarray(eri_oovv)
+        self.oooo = np.ascontiguousarray(eri_oooo)
         return
 
     def kernel(self, multi):

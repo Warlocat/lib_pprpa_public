@@ -78,12 +78,12 @@ def make_tdm1(xy1, xy2, oo_dim, mult='t'):
         tdm = np.einsum('ac,bc->ab', vir_x_mat1.conj(), vir_x_mat2).T
         diagonal_correction = np.einsum('ab,ab->', vir_x_mat1.conj(), vir_x_mat2)
     elif vv_dim == 0:
-        tdm = np.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
+        tdm = -np.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
         diagonal_correction = np.einsum('ij,ij->', occ_y_mat1.conj(), occ_y_mat2)
     else:
         print('Warning: TDM is not well-defined for pp-RPA with both DEA and DIP blocks.')
         tdm_v = np.einsum('ac,bc->ab', vir_x_mat1.conj(), vir_x_mat2).T
-        tdm_o = np.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
+        tdm_o = -np.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
         diagonal_correction = np.einsum('ab,ab->', vir_x_mat1.conj(), vir_x_mat2) + np.einsum(
             'ij,ij->', occ_y_mat1.conj(), occ_y_mat2
         )
@@ -187,7 +187,7 @@ def choose_range(label, nfrozen_occ, nocc, nvir, nfrozen_vir):
         raise ValueError('label = {}. is not valid in choose_slice'.format(label))
 
 
-def contraction_1rdm_eri_diag(
+def contraction_1rdm_Lpq_diag(
     den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, label2, den_label='p', rhf=False
 ):
     r"""
@@ -220,7 +220,7 @@ def contraction_1rdm_eri_diag(
     return out
 
 
-def contraction_1rdm_eri(
+def contraction_1rdm_Lpq(
     den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, label2, den_label1='P', den_label2='P', rhf=False
 ):
     r"""
@@ -257,7 +257,7 @@ def contraction_1rdm_eri(
     return out
 
 
-def contraction_2rdm_eri(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, label2):
+def contraction_2rdm_Lpq(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, label2):
     r"""
     Contraction in the form of (anti-symmetrized or symmetrized)
         I_{tp} = \frac{1}{2} \sum_{qrs} \Gamma_{pq,rs} \langle tq||rs \rangle
@@ -286,7 +286,19 @@ def contraction_2rdm_eri(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ
     slice_i = choose_slice('i', nfrozen_occ, nocc, nvir, nfrozen_vir)
     slice_a = choose_slice('a', nfrozen_occ, nocc, nvir, nfrozen_vir)
     naux = Lpq_full.shape[0]
-    is_complex = occ_y_mat.dtype == np.complex128
+    
+    # Special cases for TDA
+    if label1 == 'p':
+        if nocc == 0:
+            label1 = 'a'
+        elif nvir == 0:
+            label1 = 'i'
+    if label2 == 'p':
+        if nocc == 0:
+            label2 = 'a'
+        elif nvir == 0:
+            label2 = 'i'
+
     if label1 == 'i':
         n1 = nocc
     elif label1 == 'a':
@@ -314,40 +326,42 @@ def contraction_2rdm_eri(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ
         tmp = np.matmul(L1i, Lij)  # (t,Pl)(Pl,j)->(t,j)
         out = np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(j,i) -> (t,i)
 
-        L1a = np.ascontiguousarray(Lpq_full[:, slice1, slice_a]).reshape(-1, nvir)  # (Pt,c)
-        Lai = np.ascontiguousarray(Lpq_full[:, slice_a, slice_i]).reshape(-1, nocc).conj()  # (P,d,j)*->(Pd,j)
-        L1a = np.matmul(L1a, vir_x_mat).reshape(naux, n1, nvir)  # (Pt,c)(c,d)->(P,t,d)
-        L1a = L1a.transpose(1, 0, 2).reshape(n1, -1)  # (P,t,d)->(t,Pd)
-        tmp = np.matmul(L1a, Lai)  # (t,Pd)(Pd,j)->(t,j)
-        out += np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(j,i) -> (t,i)
+        if nvir > 0:
+            L1a = np.ascontiguousarray(Lpq_full[:, slice1, slice_a]).reshape(-1, nvir)  # (Pt,c)
+            Lai = np.ascontiguousarray(Lpq_full[:, slice_a, slice_i]).reshape(-1, nocc).conj()  # (P,d,j)*->(Pd,j)
+            L1a = np.matmul(L1a, vir_x_mat).reshape(naux, n1, nvir)  # (Pt,c)(c,d)->(P,t,d)
+            L1a = L1a.transpose(1, 0, 2).reshape(n1, -1)  # (P,t,d)->(t,Pd)
+            tmp = np.matmul(L1a, Lai)  # (t,Pd)(Pd,j)->(t,j)
+            out += np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(j,i) -> (t,i)
     elif label2 == 'a':
         # Slow but more readable version
-        # out = np.einsum("ab,kl,Ptk,Pbl->ta", vir_x_mat.conj(), occ_y_mat,
-        #                 Lpq_full[:,slice1,slice_i],
-        #                 Lpq_full[:,slice_a,slice_i],
-        #                 optimize=True)
-        # out+= np.einsum("ab,cd,Ptc,Pbd->ta", vir_x_mat.conj(), vir_x_mat,
+        # out = np.einsum("ab,cd,Ptc,Pbd->ta", vir_x_mat.conj(), vir_x_mat,
         #                 Lpq_full[:,slice1,slice_a],
         #                 Lpq_full[:,slice_a,slice_a],
         #                 optimize=True)
-        L1i = np.ascontiguousarray(Lpq_full[:, slice1, slice_i]).reshape(-1, nocc)  # (Pt,k)
-        Lia = np.ascontiguousarray(Lpq_full[:, slice_i, slice_a]).reshape(-1, nvir).conj()  # (P,l,b)*->(Pl,b)
-        L1i = np.matmul(L1i, occ_y_mat).reshape(naux, n1, nocc)  # (Pt,k)(k,l)->(P,t,l)
-        L1i = L1i.transpose(1, 0, 2).reshape(n1, -1)  # (P,t,l)->(t,Pl)
-        tmp = np.matmul(L1i, Lia)  # (t,Pl)(Pl,b)->(t,b)
-        out = np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(b,a) -> (t,a)
-
+        # out+= np.einsum("ab,kl,Ptk,Pbl->ta", vir_x_mat.conj(), occ_y_mat,
+        #                 Lpq_full[:,slice1,slice_i],
+        #                 Lpq_full[:,slice_a,slice_i],
+        #                 optimize=True)
         L1a = np.ascontiguousarray(Lpq_full[:, slice1, slice_a]).reshape(-1, nvir)  # (Pt,c)
         Lab = np.ascontiguousarray(Lpq_full[:, slice_a, slice_a]).reshape(-1, nvir).conj()  # (P,b,d)*->(Pd,b)
         L1a = np.matmul(L1a, vir_x_mat).reshape(naux, n1, nvir)  # (Pt,c)(c,d)->(P,t,d)
         L1a = L1a.transpose(1, 0, 2).reshape(n1, -1)  # (P,t,d)->(t,Pd)
         tmp = np.matmul(L1a, Lab)  # (t,Pd)(Pd,b)->(t,b)
-        out += np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(b,a) -> (t,a)
+        out = np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(b,a) -> (t,a)
+
+        if nocc > 0:
+            L1i = np.ascontiguousarray(Lpq_full[:, slice1, slice_i]).reshape(-1, nocc)  # (Pt,k)
+            Lia = np.ascontiguousarray(Lpq_full[:, slice_i, slice_a]).reshape(-1, nvir).conj()  # (P,l,b)*->(Pl,b)
+            L1i = np.matmul(L1i, occ_y_mat).reshape(naux, n1, nocc)  # (Pt,k)(k,l)->(P,t,l)
+            L1i = L1i.transpose(1, 0, 2).reshape(n1, -1)  # (P,t,l)->(t,Pl)
+            tmp = np.matmul(L1i, Lia)  # (t,Pl)(Pl,b)->(t,b)
+            out += np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(b,a) -> (t,a)
     elif label2 == 'p':
         # slow (more copies) but more readable version
         # out = np.concatenate((
-        # contraction_2rdm_eri(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, "i"),
-        # contraction_2rdm_eri(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, "a")), axis=1)
+        # contraction_2rdm_Lpq(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, "i"),
+        # contraction_2rdm_Lpq(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, "a")), axis=1)
         out = np.zeros((n1, nocc + nvir), dtype=occ_y_mat.dtype)
         L1i = np.ascontiguousarray(Lpq_full[:, slice1, slice_i]).reshape(-1, nocc)  # (Pt,k)
         Lia = np.ascontiguousarray(Lpq_full[:, slice_i, slice_a]).reshape(-1, nvir).conj()  # (P,l,b)*->(Pl,b)
@@ -369,7 +383,71 @@ def contraction_2rdm_eri(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ
         tmp = np.matmul(L1a, Lai)  # (t,Pd)(Pd,j)->(t,j)
         out[:, :nocc] += np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(j,i) -> (t,i)
     else:
-        raise ValueError('label2 = {}. is not valid in contraction_2rdm_eri'.format(label2))
+        raise ValueError('label2 = {}. is not valid in contraction_2rdm_Lpq'.format(label2))
+
+    return out
+
+def contraction_2rdm_eri(occ_y_mat, vir_x_mat, eri_X, eri_Y, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, label2):
+    r"""
+    Contraction in the form of (anti-symmetrized or symmetrized)
+        I_{tp} = \sum_{qrsP} XY_{pq}^* XY_{rs} \langle tq|rs \rangle
+        I_{ti} = \sum_{j} Y_{ij}^* \sum_{kl} Y_{kl} \langle tj|kl \rangle
+               + \sum_{j} Y_{ij}^* \sum_{cd} X_{cd} \langle tj|cd \rangle
+        I_{ta} = \sum_{b} X_{ab}^* \sum_{kl} Y_{kl} \langle tb|kl \rangle
+               + \sum_{b} X_{ab}^* \sum_{cd} X_{cd} \langle tb|cd \rangle
+    Args:
+        occ_y_mat: coefficients for occupied orbitals Y
+        vir_x_mat: coefficients for virtual orbitals X
+        eri_X: \sum_{cd} X_{cd} \langle tq|cd \rangle (nall, nact)
+        eri_Y: \sum_{kl} Y_{kl} \langle tq|kl \rangle (nall, nact)
+        nocc: number of active occupied orbitals.
+        nvir: number of active virtual orbitals.
+        nfrozen_occ: number of frozen occupied orbitals.
+        nfrozen_vir: number of frozen virtual orbitals.
+        label1: label for the first index t
+        label2: label for the second index p
+    Returns:
+        out: contracted intermediates.
+    """
+    # qrs are all active space indices.
+    slice1 = choose_slice(label1, nfrozen_occ, nocc, nvir, nfrozen_vir)
+    
+    # Special cases for TDA
+    if label1 == 'p':
+        if nocc == 0:
+            label1 = 'a'
+        elif nvir == 0:
+            label1 = 'i'
+    if label2 == 'p':
+        if nocc == 0:
+            label2 = 'a'
+        elif nvir == 0:
+            label2 = 'i'
+
+    if label1 == 'i':
+        n1 = nocc
+    elif label1 == 'a':
+        n1 = nvir
+    elif label1 == 'ip':
+        n1 = nfrozen_occ
+    elif label1 == 'ap':
+        n1 = nfrozen_vir
+    else:
+        n1 = nocc + nvir
+    if label2 == 'i':
+        tmp = np.ascontiguousarray(eri_Y[slice1, :nocc] + eri_X[slice1, :nocc])  # (t,j)
+        out = np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(i,j) -> (t,i)
+    elif label2 == 'a':
+        tmp = np.ascontiguousarray(eri_Y[slice1, nocc:] + eri_X[slice1, nocc:])  # (t,b)
+        out = np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(a,b) -> (t,a)
+    elif label2 == 'p':
+        out = np.zeros((n1, nocc + nvir), dtype=occ_y_mat.dtype)
+        tmp = np.ascontiguousarray(eri_Y[slice1, :nocc] + eri_X[slice1, :nocc])  # (t,j)
+        out[:,:nocc] = np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(i,j) -> (t,i)
+        tmp = np.ascontiguousarray(eri_Y[slice1, nocc:] + eri_X[slice1, nocc:])  # (t,b)
+        out[:,nocc:] = np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(a,b) -> (t,a)
+    else:
+        raise ValueError('label2 = {}. is not valid in contraction_2rdm_Lpq'.format(label2))
 
     return out
 
@@ -403,10 +481,10 @@ def get_I_pp_int(den, occ_y_mat, vir_x_mat, mo_ene_full, Lpq_full, nocc, nvir, n
     # calculate I' first
     i_prime = np.zeros((len(mo_ene_full), len(mo_ene_full)), dtype=occ_y_mat.dtype)
     # I' active-active block
-    i_prime[slice_p, slice_p] += contraction_2rdm_eri(
+    i_prime[slice_p, slice_p] += contraction_2rdm_Lpq(
         occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
     )
-    i_prime[slice_a, slice_i] += contraction_1rdm_eri_diag(
+    i_prime[slice_a, slice_i] += contraction_1rdm_Lpq_diag(
         den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'a', 'i', rhf=rhf
     )
     for p in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
@@ -414,21 +492,21 @@ def get_I_pp_int(den, occ_y_mat, vir_x_mat, mo_ene_full, Lpq_full, nocc, nvir, n
 
     if nfrozen_vir > 0:
         # I' frozen virtual-active block
-        i_prime[slice_ap, slice_p] += contraction_2rdm_eri(
+        i_prime[slice_ap, slice_p] += contraction_2rdm_Lpq(
             occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
         )
-        i_prime[slice_ap, slice_i] += contraction_1rdm_eri_diag(
+        i_prime[slice_ap, slice_i] += contraction_1rdm_Lpq_diag(
             den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'i', rhf=rhf
         )
 
     if nfrozen_occ > 0:
         # I' frozen occupied-active block
-        i_prime[slice_ip, slice_p] += contraction_2rdm_eri(
+        i_prime[slice_ip, slice_p] += contraction_2rdm_Lpq(
             occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
         )
 
         # I' all virtual-frozen occupied block
-        i_prime[slice_A, slice_ip] += contraction_1rdm_eri_diag(
+        i_prime[slice_A, slice_ip] += contraction_1rdm_Lpq_diag(
             den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'ip', rhf=rhf
         )
 
@@ -510,7 +588,7 @@ def get_I_pp_int_chol(den, Gpq_chol, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_
     i_prime[slice_p, slice_p] += contraction_2rdm_eri_chol(
         Gpq_chol, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
     )
-    i_prime[slice_a, slice_i] += contraction_1rdm_eri_diag(
+    i_prime[slice_a, slice_i] += contraction_1rdm_Lpq_diag(
         den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'a', 'i'
     )
     for p in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
@@ -520,7 +598,7 @@ def get_I_pp_int_chol(den, Gpq_chol, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_
     i_prime[slice_ap, slice_p] += contraction_2rdm_eri_chol(
         Gpq_chol, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
     )
-    i_prime[slice_ap, slice_i] += contraction_1rdm_eri_diag(
+    i_prime[slice_ap, slice_i] += contraction_1rdm_Lpq_diag(
         den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'i'
     )
     # I' frozen occupied-active block
@@ -529,7 +607,7 @@ def get_I_pp_int_chol(den, Gpq_chol, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_
     )
 
     # I' all virtual-frozen occupied block
-    i_prime[slice_A, slice_ip] += contraction_1rdm_eri_diag(
+    i_prime[slice_A, slice_ip] += contraction_1rdm_Lpq_diag(
         den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'ip'
     )
 
@@ -561,12 +639,12 @@ def get_X_int(i_pp_A_I, d_p_I_i, d_p_A_a, Lpq_full, nocc, nvir, nfrozen_occ, nfr
         x_int: the X vector (nvir_full*nocc_full)
     """
     x_vec = i_pp_A_I.copy()
-    x_vec += contraction_1rdm_eri(d_p_I_i, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'I', 'i', rhf=rhf)
-    x_vec += contraction_1rdm_eri(
+    x_vec += contraction_1rdm_Lpq(d_p_I_i, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'I', 'i', rhf=rhf)
+    x_vec += contraction_1rdm_Lpq(
         d_p_I_i.T.conj(), Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'i', 'I', rhf=rhf
     )
-    x_vec += contraction_1rdm_eri(d_p_A_a, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'A', 'a', rhf=rhf)
-    x_vec += contraction_1rdm_eri(
+    x_vec += contraction_1rdm_Lpq(d_p_A_a, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'A', 'a', rhf=rhf)
+    x_vec += contraction_1rdm_Lpq(
         d_p_A_a.T.conj(), Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'a', 'A', rhf=rhf
     )
 
@@ -588,8 +666,8 @@ def z_vector_eqn_matvec(input_vec, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_oc
         hd_vec: the Z-vector equation matrix-vector product (nvir_full*nocc_full)
     """
     d_p_AI = input_vec.reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
-    hd_vec = contraction_1rdm_eri(d_p_AI, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'A', 'I', rhf=rhf)
-    hd_vec += contraction_1rdm_eri(
+    hd_vec = contraction_1rdm_Lpq(d_p_AI, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'A', 'I', rhf=rhf)
+    hd_vec += contraction_1rdm_Lpq(
         d_p_AI.T.conj(), Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'A', 'I', 'I', 'A', rhf=rhf
     )
     for a in choose_range('A', nfrozen_occ, nocc, nvir, nfrozen_vir):
@@ -598,7 +676,7 @@ def z_vector_eqn_matvec(input_vec, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_oc
     return hd_vec.reshape(-1)
 
 
-def z_vector_eqn_solver(x_int, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, rhf=False):
+def z_vector_eqn_solver(x_int, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, rhf=False, matvec=None, print_level=0):
     """
     Solve the Z-vector equation.
     Args:
@@ -613,8 +691,9 @@ def z_vector_eqn_solver(x_int, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, n
         D' intermediates (A-I block)
     """
 
-    def matvec(input_vec):
-        return z_vector_eqn_matvec(input_vec, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, rhf=rhf)
+    if matvec is None:
+        def matvec(input_vec):
+            return z_vector_eqn_matvec(input_vec, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, rhf=rhf)
 
     mat_diag = np.zeros((nvir + nfrozen_vir, nocc + nfrozen_occ), dtype=np.double)  # diagonal elements must be real
     # It is not necessary to calculate the exact diagonal elements
@@ -624,7 +703,7 @@ def z_vector_eqn_solver(x_int, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, n
             mat_diag[a - nfrozen_occ - nocc, i] = mo_ene_full[a] - mo_ene_full[i]
     mat_diag = mat_diag.reshape(-1)
 
-    return GMRES_Pople(matvec, mat_diag, -x_int).reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
+    return GMRES_Pople(matvec, mat_diag, -x_int, printLevel=print_level).reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
     # return GMRES_wrapper(matvec, mat_diag, -x_int).reshape(nvir+nfrozen_vir, nocc+nfrozen_occ)
 
 
@@ -681,9 +760,9 @@ def get_I_int(i_p, d_p, den, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, nfr
     slice_a = choose_slice('a', nfrozen_occ, nocc, nvir, nfrozen_vir)
     # I all occupied-all occupied block
     i_int[slice_I, slice_I] -= (
-        0.5 * contraction_1rdm_eri_diag(den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'I', 'I', 'p', rhf=rhf).T
+        0.5 * contraction_1rdm_Lpq_diag(den, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'I', 'I', 'p', rhf=rhf).T
     )
-    i_int[slice_I, slice_I] -= contraction_1rdm_eri(
+    i_int[slice_I, slice_I] -= contraction_1rdm_Lpq(
         d_p, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'I', 'I', 'P', 'P', rhf=rhf
     ).T
     # I active virtual-all occupied block
@@ -1004,7 +1083,6 @@ def _contract_xc_kernel(mf, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=Tr
     mol = mf.mol
     grids = mf.grids
 
-    from pyscf import dft
     ni = mf._numint
     xctype = ni._xc_type(xc_code)
 
@@ -1112,6 +1190,110 @@ def _contract_xc_kernel(mf, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=Tr
                 kxc = kxc[:, :, 0] - kxc[:, :, 1]
                 wv = np.einsum('yg,zg,xyzg,g->xg', rho1, rho1, kxc, weight)
                 fmat_(mol, k1ao, ao, wv, mask, shls_slice, ao_loc)
+
+    f1vo[1:] *= -1
+    if f1oo is not None:
+        f1oo[1:] *= -1
+    if v1ao is not None:
+        v1ao[1:] *= -1
+    if k1ao is not None:
+        k1ao[1:] *= -1
+
+    return f1vo, f1oo, v1ao, k1ao
+
+
+def get_veff_krks(ks_grad, dm=None, kpts=None):
+    from pyscf.pbc.grad.krks import get_vxc
+    mf = ks_grad.base
+    cell = ks_grad.cell
+    if dm is None: dm = mf.make_rdm1()
+    if kpts is None: kpts = mf.kpts
+    t0 = (logger.process_clock(), logger.perf_counter())
+
+    ni = mf._numint
+    if ks_grad.grids is not None:
+        grids = ks_grad.grids
+    else:
+        grids = mf.grids
+    if grids.coords is None:
+        grids.build(with_non0tab=True)
+
+    mem_now = lib.current_memory()[0]
+    max_memory = max(2000, ks_grad.max_memory*.9-mem_now)
+    if ks_grad.grid_response:
+        raise NotImplementedError
+    else:
+        vxc = get_vxc(ni, cell, grids, mf.xc, dm, kpts,
+                           max_memory=max_memory, verbose=ks_grad.verbose)
+
+    t0 = logger.timer(ks_grad, 'vxc', *t0)
+    if not ni.libxc.is_hybrid_xc(mf.xc):
+        vjk = ks_grad.get_j(dm, kpts)
+    else:
+        omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=cell.spin)
+        vj, vk = ks_grad.get_jk(dm, kpts)
+        vk *= hyb
+        if omega != 0:
+            with cell.with_range_coulomb(omega):
+                vk += ks_grad.get_k(dm, kpts) * (alpha - hyb)
+        vjk = vj - vk * .5
+
+    return vxc, vjk
+
+
+def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000):
+    from pyscf import lib
+    from pyscf.lib import logger
+    from pyscf.grad.tdrks import _lda_eval_mat_, _gga_eval_mat_, _mgga_eval_mat_
+    from pyscf.dft.numint import eval_rho, eval_rho2
+
+    mol = mf.mol
+    grids = mf.grids
+
+    ni = mf._numint
+    xctype = ni._xc_type(xc_code)
+
+    mo_coeff = mf.mo_coeff[0]
+    mo_occ = mf.mo_occ[0]
+    nao, nmo = mo_coeff.shape
+    shls_slice = (0, mol.nbas)
+    ao_loc = mol.ao_loc_nr()
+
+    # dmvo ~ reduce(np.dot, (orbv, Xai, orbo.T))
+    dmvo = (dmvo + dmvo.T) * 0.5  # because K_{ia,jb} == K_{ia,bj}
+
+    f1vo = np.zeros((4, nao, nao))  # 0th-order, d/dx, d/dy, d/dz
+    deriv = 2
+    f1oo = None
+    v1ao = None
+    k1ao = None
+
+    if xctype == 'HF':
+        return f1vo, f1oo, v1ao, k1ao
+    elif xctype == 'LDA':
+        fmat_, ao_deriv = _lda_eval_mat_, 1
+    elif xctype == 'GGA':
+        fmat_, ao_deriv = _gga_eval_mat_, 2
+    elif xctype == 'MGGA':
+        fmat_, ao_deriv = _mgga_eval_mat_, 2
+        logger.warn(mf, 'PPRPA-MGGA Gradients may be inaccurate due to grids response')
+    else:
+        raise NotImplementedError(f'td-rks for functional {xc_code}')
+
+    for aok0, aok1, mask, weight, coords in ni.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
+        aok0 = aok0[0]
+        if xctype == 'LDA':
+            ao0 = aok0[0]
+        else:
+            ao0 = aok0
+        rho = eval_rho2(mol, ao0, mo_coeff, mo_occ, mask, xctype, with_lapl=False)
+        vxc, fxc, kxc = ni.eval_xc_eff(xc_code, rho, deriv, xctype=xctype)[1:]
+
+        rho1 = eval_rho(mol, ao0, dmvo, mask, xctype, hermi=1, with_lapl=False) * 2  # *2 for alpha + beta
+        if xctype == 'LDA':
+            rho1 = rho1[np.newaxis]
+        wv = np.einsum('yg,xyg,g->xg', rho1, fxc, weight)
+        fmat_(mol, f1vo, aok0, wv, mask, shls_slice, ao_loc)
 
     f1vo[1:] *= -1
     if f1oo is not None:

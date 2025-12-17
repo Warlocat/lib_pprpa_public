@@ -985,6 +985,91 @@ def create_frac_scf_object(mf, frac_spin, frac_orb, frac_occ):
 
     return frac_mf
 
+
+def get_pyscf_input_mol_eri_r(
+        mf, nocc_act=None, nvir_act=None, dump_file=None,
+        sort_mo=False, incore=True, return_raw=False):
+    """Get ppRPA use eri input from a PySCF molecular SCF calculation.
+
+    Args:
+        mf (pyscf.scf.RHF/pyscf.dft.RKS): molecular mean-field object.
+        nocc_act (int, optional): number of active occupied orbitals. Defaults to None.
+        nvir_act (int, optional): number of active virtual orbitals. Defaults to None.
+        dump_file (str, optional): file name to dump matrix for lib_pprpa. Defaults to None.
+        return_raw (bool, optional): whether to return raw four-center integrals.
+
+    Returns:
+        nocc_act (int): number of occupied orbitals in the active space.
+        mo_energy_act (double array): orbital energy in the active space.
+        vvvv (double ndarray): four-center two-electron integrals
+        oooo (double ndarray): four-center two-electron integrals
+        oovv (double ndarray): four-center two-electron integrals
+    """
+    from pyscf import df
+    from pyscf.ao2mo import _ao2mo
+
+    start_clock("getting input for molecule ppRPA from PySCF")
+
+    nmo = len(mf.mo_energy)
+    nocc = mf.mol.nelectron // 2
+    nvir = nmo - nocc
+    mo_energy = numpy.array(mf.mo_energy)
+    mo_coeff = numpy.array(mf.mo_coeff)
+
+    if sort_mo is True:
+        occ_index = numpy.where(mf.mo_occ > 0.5)[0]
+        vir_index = numpy.where(mf.mo_occ < 0.5)[0]
+        print("sorting molecular orbitals")
+        print("occ index = ", occ_index)
+        print("vir index = ", vir_index)
+        if occ_index[-1] < vir_index[0]:
+            print("warning: no sorting is performed!")
+        mo_energy_occ = mo_energy[occ_index]
+        mo_energy_vir = mo_energy[vir_index]
+        mo_energy = numpy.concatenate((mo_energy_occ, mo_energy_vir))
+        mo_coeff_occ = mo_coeff[:, occ_index]
+        mo_coeff_vir = mo_coeff[:, vir_index]
+        mo_coeff = numpy.concatenate((mo_coeff_occ, mo_coeff_vir), axis=1)
+
+    nocc_act = nocc if nocc_act is None else min(nocc, nocc_act)
+    nvir_act = nvir if nvir_act is None else min(nvir, nvir_act)
+    nmo_act = nocc_act + nvir_act
+    mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
+
+    from pyscf import ao2mo
+    if incore:
+        eri_raw = ao2mo.incore.full(mf._eri, mo_coeff[:,(nocc-nocc_act):(nocc+nvir_act)])
+        if dump_file is not None:
+            f = h5py.File(name="%s.h5" % dump_file, mode="w")
+            f["nocc"] = numpy.asarray(nocc_act)
+            f["mo_energy"] = numpy.asarray(mo_energy_act)
+            f["eri_raw"] = numpy.asarray(eri_raw)
+            f.close()
+        # (pq|rs)
+        eri_raw = ao2mo.restore(1, eri_raw, nmo_act)
+        # <pq|rs>
+        eri_raw = eri_raw.transpose(0, 2, 1, 3)
+        oooo = eri_raw[:nocc_act, :nocc_act, :nocc_act, :nocc_act]
+        vvvv = eri_raw[nocc_act:, nocc_act:, nocc_act:, nocc_act:]
+        oovv = eri_raw[:nocc_act, :nocc_act, nocc_act:, nocc_act:]
+    else:
+        raise NotImplementedError("only incore=True is implemented.")
+    
+
+    print("\nget input for lib_pprpa from PySCF (molecule)")
+    print("nmo = %-d, nocc= %-d, nvir = %-d" % (nmo, nocc, nvir))
+    print("nmo_act = %-d, nocc_act= %-d, nvir_act = %-d" %
+          (nmo_act, nocc_act, nvir_act))
+    print("dump h5py file = %-s" % dump_file)
+
+    stop_clock("getting input for molecule ppRPA from PySCF")
+
+    if not return_raw:
+        return nocc_act, mo_energy_act, vvvv, oooo, oovv
+    else:
+        return nocc_act, mo_energy_act, eri_raw
+
+
 def _write_dump_file(filename, nocc, mo_energy, Lpq, mo_dip=None):
     """Write ppRPA inputs to a file.
     see get_pyscf_input_mol_r for details about the inputs.
