@@ -484,11 +484,9 @@ class PPRPAIntermediates:
     max_iter: int
     conv: bool
     ntri: int
-    nprod: int
     multi: str
     channel: str
     trial: str
-    mv_prod: numpy.ndarray
     tri_vec: numpy.ndarray
     tri_vec_sig: numpy.ndarray
 

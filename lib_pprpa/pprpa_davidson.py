@@ -27,10 +27,12 @@ def kernel(pprpa):
             checkpoint_data = pprpa._load_pprpa_checkpoint()
             tri_vec = checkpoint_data.tri_vec
             tri_vec_sig = checkpoint_data.tri_vec_sig
-            mv_prod = checkpoint_data.mv_prod
             ntri = checkpoint_data.ntri
-            nprod = checkpoint_data.nprod
-    else:
+            mv_prod = pprpa.contraction(tri_vec)
+            nprod = ntri
+            normal_setup = False
+
+    if normal_setup:
         # the maximum size is max_vec + nroot for compacting
         tri_size = pprpa.max_vec + pprpa.nroot
         tri_vec = np.zeros(
@@ -960,8 +962,6 @@ class ppRPA_Davidson():
         f["max_iter"] = np.asarray(self.max_iter)
         f["conv"] = np.asarray(conv)
         f["ntri"] = np.asarray(ntri)
-        f["nprod"] = np.asarray(nprod)
-        f["mv_prod"] = np.asarray(mv_prod)
         f["tri_vec"] = np.asarray(tri_vec)
         f["tri_vec_sig"] = np.asarray(tri_vec_sig)
         f.close()
@@ -986,8 +986,6 @@ class ppRPA_Davidson():
             max_iter=int(np.asarray(f["max_iter"])),
             conv=bool(np.asarray(f["conv"])),
             ntri=int(np.asarray(f["ntri"])),
-            nprod=int(np.asarray(f["nprod"])),
-            mv_prod=np.asarray(f["mv_prod"]),
             tri_vec=np.asarray(f["tri_vec"]),
             tri_vec_sig=np.asarray(f["tri_vec_sig"]),
         )
