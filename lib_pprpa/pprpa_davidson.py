@@ -16,10 +16,7 @@ def kernel(pprpa):
     if pprpa._use_Lov:
         data_type = pprpa.Lpi.dtype
     else:
-        if pprpa._use_Lov:
-            data_type = pprpa.Lpi.dtype
-        else:
-            data_type = pprpa.Lpq.dtype
+        data_type = pprpa.Lpq.dtype
 
     normal_setup = True
     # gpprpa_davidson does not have checkpoint_file attribute, but uses this kernel
