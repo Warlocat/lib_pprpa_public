@@ -21,10 +21,11 @@ def kernel(pprpa):
         else:
             data_type = pprpa.Lpq.dtype
 
+    normal_setup = True
     # gpprpa_davidson does not have checkpoint_file attribute, but uses this kernel
-    if hasattr(pprpa, "checkpoint_file"):
-        if pprpa.checkpoint_file is not None and Path(pprpa.checkpoint_file).exists():
-            checkpoint_data = pprpa._load_pprpa_checkpoint()
+    if getattr(pprpa, "checkpoint_file", None) is not None and Path(pprpa.checkpoint_file).exists():
+        checkpoint_data = pprpa._load_pprpa_checkpoint()
+        if checkpoint_data is not None:
             tri_vec = checkpoint_data.tri_vec
             tri_vec_sig = checkpoint_data.tri_vec_sig
             ntri = checkpoint_data.ntri
@@ -948,46 +949,56 @@ class ppRPA_Davidson():
         """triggered by the kernel"""
         fn = self.checkpoint_file
         print("\nSaving intermediate pprpa results to %s.\n" % fn)
-        f = h5py.File(fn, "w")
-        f["nocc"] = np.asarray(self.nocc)
-        f["nvir"] = np.asarray(self.nvir)
-        f["multi"] = np.asarray(0 if self.multi == "s" else 1)
-        f["channel"] = np.asarray(0 if self.channel == "pp" else 1)
-        f["trial"] = np.asarray(0 if self.trial == "identity" else 1)
-        f["_use_eri"] = np.asarray(self._use_eri)
-        f["_ao_direct"] = np.asarray(self._ao_direct)
-        f["_use_Lov"] = np.asarray(self._use_Lov)
-        f["nroot"] = np.asarray(self.nroot)
-        f["max_vec"] = np.asarray(self.max_vec)
-        f["max_iter"] = np.asarray(self.max_iter)
-        f["conv"] = np.asarray(conv)
-        f["ntri"] = np.asarray(ntri)
-        f["tri_vec"] = np.asarray(tri_vec)
-        f["tri_vec_sig"] = np.asarray(tri_vec_sig)
+        f = h5py.File(fn, "a")
+        group_name = "singlet" if self.multi == "s" else "triplet"
+        if group_name in f:
+            del f[group_name]
+        g = f.create_group(group_name)
+        g["nocc"] = np.asarray(self.nocc)
+        g["nvir"] = np.asarray(self.nvir)
+        g["channel"] = np.asarray(0 if self.channel == "pp" else 1)
+        g["trial"] = np.asarray(0 if self.trial == "identity" else 1)
+        # g["_use_eri"] = np.asarray(self._use_eri)
+        # g["_ao_direct"] = np.asarray(self._ao_direct)
+        g["_use_Lov"] = np.asarray(self._use_Lov)
+        g["nroot"] = np.asarray(self.nroot)
+        g["max_vec"] = np.asarray(self.max_vec)
+        g["conv"] = np.asarray(conv)
+        g["ntri"] = np.asarray(ntri)
+        g["tri_vec"] = np.asarray(tri_vec)
+        g["tri_vec_sig"] = np.asarray(tri_vec_sig)
         f.close()
         return
 
     def _load_pprpa_checkpoint(self):
         """triggered by the kernel"""
         fn = self.checkpoint_file
+        if not Path(fn).exists():
+            return None
         print("\nLoading intermediate pprpa results from %s.\n" % fn)
         f = h5py.File(fn, "r")
+        group_name = "singlet" if self.multi == "s" else "triplet"
+        if group_name not in f:
+            print("No checkpoint found for %s multiplicity." % group_name)
+            f.close()
+            return None
+
+        g = f[group_name]
         checkpoint_data = PPRPAIntermediates(
-            nocc=int(np.asarray(f["nocc"])),
-            nvir=int(np.asarray(f["nvir"])),
-            multi="s" if int(np.asarray(f["multi"])) == 0 else "t",
-            channel="pp" if int(np.asarray(f["channel"])) == 0 else "hh",
-            trial="identity" if int(np.asarray(f["trial"])) == 0 else "subspace",
-            _use_eri=bool(np.asarray(f["_use_eri"])),
-            _ao_direct=bool(np.asarray(f["_ao_direct"])),
-            _use_Lov=bool(np.asarray(f["_use_Lov"])),
-            nroot=int(np.asarray(f["nroot"])),
-            max_vec=int(np.asarray(f["max_vec"])),
-            max_iter=int(np.asarray(f["max_iter"])),
-            conv=bool(np.asarray(f["conv"])),
-            ntri=int(np.asarray(f["ntri"])),
-            tri_vec=np.asarray(f["tri_vec"]),
-            tri_vec_sig=np.asarray(f["tri_vec_sig"]),
+            nocc=int(np.asarray(g["nocc"])),
+            nvir=int(np.asarray(g["nvir"])),
+            multi="s" if group_name == "singlet" else "t",
+            channel="pp" if int(np.asarray(g["channel"])) == 0 else "hh",
+            trial="identity" if int(np.asarray(g["trial"])) == 0 else "subspace",
+            # _use_eri=bool(np.asarray(g["_use_eri"])),
+            # _ao_direct=bool(np.asarray(g["_ao_direct"])),
+            _use_Lov=bool(np.asarray(g["_use_Lov"])),
+            nroot=int(np.asarray(g["nroot"])),
+            max_vec=int(np.asarray(g["max_vec"])),
+            conv=bool(np.asarray(g["conv"])),
+            ntri=int(np.asarray(g["ntri"])),
+            tri_vec=np.asarray(g["tri_vec"]),
+            tri_vec_sig=np.asarray(g["tri_vec_sig"]),
         )
         f.close()
         verify_checkpoint_compatibility(self, checkpoint_data)

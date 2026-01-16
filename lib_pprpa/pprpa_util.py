@@ -476,12 +476,11 @@ class PPRPAIntermediates:
     """Container for the ppRPA intermediates."""
     nocc: int
     nvir: int
-    _use_eri: bool
-    _ao_direct: bool
+    # _use_eri: bool
+    # _ao_direct: bool
     _use_Lov: bool
     nroot: int
     max_vec: int
-    max_iter: int
     conv: bool
     ntri: int
     multi: str
@@ -501,10 +500,8 @@ def verify_checkpoint_compatibility(pprpa, checkpoint_data: PPRPAIntermediates):
     """
     assert pprpa.nocc == checkpoint_data.nocc
     assert pprpa.nvir == checkpoint_data.nvir
-    assert pprpa._use_eri == checkpoint_data._use_eri
-    assert pprpa._ao_direct == checkpoint_data._ao_direct
+    # assert pprpa._use_eri == checkpoint_data._use_eri
+    # assert pprpa._ao_direct == checkpoint_data._ao_direct
     assert pprpa._use_Lov == checkpoint_data._use_Lov
-    assert pprpa.nroot == checkpoint_data.nroot
-    assert pprpa.multi == checkpoint_data.multi
     assert pprpa.channel == checkpoint_data.channel
     assert pprpa.trial == checkpoint_data.trial
