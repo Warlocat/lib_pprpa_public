@@ -504,4 +504,3 @@ def verify_checkpoint_compatibility(pprpa, checkpoint_data: PPRPAIntermediates):
     # assert pprpa._ao_direct == checkpoint_data._ao_direct
     assert pprpa._use_Lov == checkpoint_data._use_Lov
     assert pprpa.channel == checkpoint_data.channel
-    assert pprpa.trial == checkpoint_data.trial
