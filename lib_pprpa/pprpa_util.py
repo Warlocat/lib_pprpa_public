@@ -469,4 +469,3 @@ def int2ordinal(num: int):
     q, mod = divmod(num, 10)
     suffix = q % 10 != 1 and ordinal_dict.get(mod) or "th"
     return f"{num}{suffix}"
-
