@@ -45,9 +45,3 @@ pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, channel="hh")
 pprpa.kernel("s")
 pprpa.kernel("t")
 pprpa.analyze()
-
-# 2. hhTDA
-pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, channel="hh", TDA="hh")
-pprpa.kernel("s")
-pprpa.kernel("t")
-pprpa.analyze()

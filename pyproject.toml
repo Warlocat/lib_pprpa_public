@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lib_pprpa"
+version = "0.1.0"
+description = "Compute excitation energies and gradients at the ppRPA level of theory."
+readme = "README.md"
+authors = [{ name = "Jiachen Li", email = "jiachen.li@yale.edu" }]
+urls = { "Homepage" = "https://github.com/lijiachen417/lib_pprpa" }
+dependencies = [
+  "numpy<=2.3",
+  "h5py",
+  "scipy",
+  "pyscf",
+]
+classifiers = [
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.7",
+]
+
+[project.optional-dependencies]
+ase = ["ase"]
+socutils = ["socutils"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+exclude = ["tests*"]

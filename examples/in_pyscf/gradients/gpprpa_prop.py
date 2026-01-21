@@ -6,10 +6,6 @@ r"""
     step to ensure the numerical and analytical gradients are the same.
 """
 from pyscf import gto, scf
-from socutils.scf import spinor_hf
-from socutils.dft import dft
-from socutils.somf import amf
-from socutils.prop.efg import spinor_hf as efg
 from lib_pprpa.gpprpa_direct import GppRPA_direct
 from lib_pprpa.gpprpa_davidson import GppRPA_Davidson
 from lib_pprpa.pyscf_util import get_pyscf_input_mol_g

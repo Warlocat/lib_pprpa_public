@@ -454,3 +454,18 @@ def generate_spectrum(
     print(message)
     # Return energy axis and imaginary part of susceptibility (absorption)
     return energyAxis, chiAxis.imag
+
+def int2ordinal(num: int):
+    """
+    Convert a natural number to a ordinal number.
+    Args:
+        num (int): natural number
+    Returns:
+        str: ordinal number, like 0th, 1st, 2nd,...
+    """
+    assert isinstance(num, int), f"@num must be integer, but {num} was applied."
+    assert num >= 0, f"@num must be over 0, but {num} was applied."
+    ordinal_dict = {1: "st", 2: "nd", 3: "rd"}
+    q, mod = divmod(num, 10)
+    suffix = q % 10 != 1 and ordinal_dict.get(mod) or "th"
+    return f"{num}{suffix}"

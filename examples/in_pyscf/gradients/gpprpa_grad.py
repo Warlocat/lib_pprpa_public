@@ -5,7 +5,7 @@ from pyscf import gto, scf, dft
 from lib_pprpa.gpprpa_davidson import GppRPA_Davidson
 from lib_pprpa.gpprpa_direct import GppRPA_direct
 from lib_pprpa.pyscf_util import get_pyscf_input_mol
-from socutils.somf import eamf
+# from socutils.somf import eamf
 
 import numpy as np
 

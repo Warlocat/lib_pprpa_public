@@ -46,19 +46,13 @@ pprpa.kernel("s")
 pprpa.kernel("t")
 pprpa.analyze()
 
-# 2. simple ppTDA calculation
-pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, TDA="pp")
-pprpa.kernel("s")
-pprpa.kernel("t")
-pprpa.analyze()
-
-# 3. only run singlet/triplet calculation
+# 2. only run singlet/triplet calculation
 pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq)
 pprpa.kernel("s")
 #pprpa.kernel("t")
 pprpa.analyze()
 
-# 4. full control parameters
+# 3. full control parameters
 pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq, nroot=15, max_vec=300,
                        max_iter=100, residue_thresh=1.0e-8, print_thresh=0.2)
 pprpa.kernel("s")

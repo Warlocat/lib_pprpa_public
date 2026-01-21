@@ -46,9 +46,3 @@ pprpa = ppRPA_direct(nocc, mf.mo_energy, Lpq)
 pprpa.kernel("s")
 pprpa.kernel("t")
 pprpa.analyze()
-
-# 2. ppTDA calculation
-pprpa = ppRPA_direct(nocc, mf.mo_energy, Lpq, TDA=True)
-pprpa.kernel("s")
-pprpa.kernel("t")
-pprpa.analyze()

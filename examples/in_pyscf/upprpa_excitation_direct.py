@@ -14,7 +14,7 @@ mol.charge = 1
 mol.spin = 1
 mol.build()
 
-mf = scf.RHF(mol)
+mf = scf.UHF(mol)
 mf.kernel()
 
 nocc, mo_energy, Lpq = get_pyscf_input_mol_u(mf, nocc_act=None, nvir_act=None)

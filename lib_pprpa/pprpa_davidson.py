@@ -1,14 +1,15 @@
 import h5py
 import numpy as np
 import scipy
+from pathlib import Path
+from dataclasses import dataclass
 
 from lib_pprpa.analyze import pprpa_print_a_pair, get_pprpa_oscillator_strength
 from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector, \
     diagonalize_pprpa_singlet, diagonalize_pprpa_triplet
 
 from lib_pprpa.pprpa_util import ij2index, inner_product, start_clock, \
-    stop_clock, print_citation, get_chemical_potential
-
+    stop_clock, print_citation, get_chemical_potential, int2ordinal
 
 def kernel(pprpa):
     # initialize trial vector and product matrix
@@ -21,34 +22,48 @@ def kernel(pprpa):
             data_type = pprpa.Lpi.dtype
         else:
             data_type = pprpa.Lpq.dtype
-    # the maximum size is max_vec + nroot for compacting
-    tri_size = pprpa.max_vec + pprpa.nroot
-    tri_vec = np.zeros(
-        shape=[tri_size, pprpa.full_dim], dtype=data_type)
-    tri_vec_sig = np.zeros(shape=[tri_size], dtype=data_type)
-    if pprpa.channel == "pp":
-        ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
-    else:
-        ntri = min(pprpa.nroot * 4, pprpa.oo_dim)
-    if pprpa.trial == "identity":
-        tri_vec[:ntri], tri_vec_sig[:ntri] = get_identity_trial_vector(
-            pprpa=pprpa, ntri=ntri)
-    elif pprpa.trial == "subspace":
-        if pprpa._use_eri or pprpa._ao_direct:
-            raise NotImplementedError("subspace init guess not implemented for eri version.")
-        tri_vec[:ntri], tri_vec_sig[:ntri] = get_subspace_trial_vector(
-            pprpa=pprpa, ntri=ntri, channel=pprpa.channel,
-            nocc_sub=pprpa.nocc_sub, nvir_sub=pprpa.nvir_sub)
-    else:
-        raise ValueError("trial vector method not recognized.")
+
+    normal_setup = True
+    # gpprpa_davidson does not have checkpoint_file attribute, but uses this kernel
+    if getattr(pprpa, "checkpoint_file", None) is not None and Path(pprpa.checkpoint_file).exists():
+        checkpoint_data = pprpa._load_pprpa_checkpoint()
+        if checkpoint_data is not None:
+            tri_vec = checkpoint_data.tri_vec
+            tri_vec_sig = checkpoint_data.tri_vec_sig
+            ntri = checkpoint_data.ntri
+            mv_prod = pprpa.contraction(tri_vec)
+            nprod = ntri
+            normal_setup = False
+
+    if normal_setup:
+        # the maximum size is max_vec + nroot for compacting
+        tri_size = pprpa.max_vec + pprpa.nroot
+        tri_vec = np.zeros(
+            shape=[tri_size, pprpa.full_dim], dtype=data_type)
+        tri_vec_sig = np.zeros(shape=[tri_size], dtype=data_type)
+        if pprpa.channel == "pp":
+            ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
+        else:
+            ntri = min(pprpa.nroot * 4, pprpa.oo_dim)
+        if pprpa.trial == "identity":
+            tri_vec[:ntri], tri_vec_sig[:ntri] = get_identity_trial_vector(
+                pprpa=pprpa, ntri=ntri)
+        elif pprpa.trial == "subspace":
+            if pprpa._use_eri or pprpa._ao_direct:
+                raise NotImplementedError("subspace init guess not implemented for eri version.")
+            tri_vec[:ntri], tri_vec_sig[:ntri] = get_subspace_trial_vector(
+                pprpa=pprpa, ntri=ntri, channel=pprpa.channel,
+                nocc_sub=pprpa.nocc_sub, nvir_sub=pprpa.nvir_sub)
+        else:
+            raise ValueError("trial vector method not recognized.")
+        nprod = 0  # number of contracted vectors
+        mv_prod = np.zeros_like(tri_vec)  # ppRPA matrix vector product
 
     iter = 0
-    nprod = 0  # number of contracted vectors
-    mv_prod = np.zeros_like(tri_vec)  # ppRPA matrix vector product
     while iter < pprpa.max_iter:
         print(
-            "\nppRPA Davidson %d-th iteration, ntri= %d , nprod= %d ." %
-            (iter + 1, ntri, nprod), flush=True)
+            "\nppRPA Davidson %s iteration, ntri= %d , nprod= %d ." %
+            (int2ordinal(iter + 1), ntri, nprod), flush=True)
         mv_prod[nprod:ntri] = pprpa.contraction(tri_vec=tri_vec[nprod:ntri])
         nprod = ntri
 
@@ -71,6 +86,9 @@ def kernel(pprpa):
             pprpa=pprpa, first_state=first_state, tri_vec=tri_vec,
             tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
         print("add %d new trial vectors." % (ntri - ntri_old))
+        if pprpa.checkpoint_file is not None:
+            pprpa._save_pprpa_checkpoint(conv, ntri, nprod, mv_prod,
+                tri_vec, tri_vec_sig)
 
         iter += 1
         if conv is True:
@@ -852,12 +870,45 @@ def _analyze_pprpa_davidson(
 
     return res # either None or (tdm, vee)
 
+@dataclass
+class PPRPAIntermediates:
+    """Container for the Davidson algorithm intermediates."""
+    nocc: int
+    nvir: int
+    # _use_eri: bool
+    # _ao_direct: bool
+    _use_Lov: bool
+    nroot: int
+    max_vec: int
+    conv: bool
+    ntri: int
+    multi: str
+    channel: str
+    trial: str
+    tri_vec: np.ndarray
+    tri_vec_sig: np.ndarray
+
+def verify_checkpoint_compatibility(pprpa, checkpoint_data: PPRPAIntermediates):
+    """Verify that the checkpoint data is compatible with the ppRPA instance.
+    
+    Args:
+        pprpa (PPRPA): The ppRPA instance.
+        checkpoint_data (PPRPAIntermediates): The checkpoint data.
+    
+    Note: some of the data does not need to match because it isn't set in the ppRPA instance yet
+    """
+    assert pprpa.nocc == checkpoint_data.nocc
+    assert pprpa.nvir == checkpoint_data.nvir
+    # assert pprpa._use_eri == checkpoint_data._use_eri
+    # assert pprpa._ao_direct == checkpoint_data._ao_direct
+    assert pprpa._use_Lov == checkpoint_data._use_Lov
+    assert pprpa.channel == checkpoint_data.channel
 
 class ppRPA_Davidson():
     def __init__(
             self, nocc, mo_energy, Lpq, channel="pp", nroot=5, max_vec=500,
             max_iter=100, trial="identity", residue_thresh=1.0e-7,
-            print_thresh=0.1, mo_dip=None):
+            print_thresh=0.1, mo_dip=None, checkpoint_file=None):
         # necessary input
         self.nocc = nocc  # number of occupied orbitals
         self.mo_energy = np.asarray(mo_energy)  # orbital energy
@@ -883,6 +934,9 @@ class ppRPA_Davidson():
         self.print_thresh = print_thresh  # threshold to print component
         self._compact_subspace = False  # compact large subspace
         self.mo_dip = mo_dip # vector dipole integrals in MO space
+        if checkpoint_file is not None:
+            checkpoint_file += ".h5" if not checkpoint_file.endswith(".h5") else ""
+        self.checkpoint_file = checkpoint_file # checkpoint file name
 
         # internal flags
         self.multi = None  # multiplicity
@@ -1028,6 +1082,65 @@ class ppRPA_Davidson():
             f["vee"] = np.asarray(self.vee)
         f.close()
         return
+
+    def _save_pprpa_checkpoint(self, conv, ntri, nprod, mv_prod, tri_vec, tri_vec_sig):
+        """triggered by the kernel"""
+        fn = self.checkpoint_file
+        print("\nSaving intermediate pprpa results to %s.\n" % fn)
+        f = h5py.File(fn, "a")
+        group_name = "singlet" if self.multi == "s" else "triplet"
+        if group_name in f:
+            del f[group_name]
+        g = f.create_group(group_name)
+        g["nocc"] = np.asarray(self.nocc)
+        g["nvir"] = np.asarray(self.nvir)
+        g["channel"] = np.asarray(0 if self.channel == "pp" else 1)
+        g["trial"] = np.asarray(0 if self.trial == "identity" else 1)
+        # g["_use_eri"] = np.asarray(self._use_eri)
+        # g["_ao_direct"] = np.asarray(self._ao_direct)
+        g["_use_Lov"] = np.asarray(self._use_Lov)
+        g["nroot"] = np.asarray(self.nroot)
+        g["max_vec"] = np.asarray(self.max_vec)
+        g["conv"] = np.asarray(conv)
+        g["ntri"] = np.asarray(ntri)
+        g["tri_vec"] = np.asarray(tri_vec)
+        g["tri_vec_sig"] = np.asarray(tri_vec_sig)
+        f.close()
+        return
+
+    def _load_pprpa_checkpoint(self):
+        """triggered by the kernel"""
+        fn = self.checkpoint_file
+        if not Path(fn).exists():
+            return None
+        print("\nLoading intermediate pprpa results from %s.\n" % fn)
+        f = h5py.File(fn, "r")
+        group_name = "singlet" if self.multi == "s" else "triplet"
+        if group_name not in f:
+            print("No checkpoint found for %s multiplicity." % group_name)
+            f.close()
+            return None
+
+        g = f[group_name]
+        checkpoint_data = PPRPAIntermediates(
+            nocc=int(np.asarray(g["nocc"])),
+            nvir=int(np.asarray(g["nvir"])),
+            multi="s" if group_name == "singlet" else "t",
+            channel="pp" if int(np.asarray(g["channel"])) == 0 else "hh",
+            trial="identity" if int(np.asarray(g["trial"])) == 0 else "subspace",
+            # _use_eri=bool(np.asarray(g["_use_eri"])),
+            # _ao_direct=bool(np.asarray(g["_ao_direct"])),
+            _use_Lov=bool(np.asarray(g["_use_Lov"])),
+            nroot=int(np.asarray(g["nroot"])),
+            max_vec=int(np.asarray(g["max_vec"])),
+            conv=bool(np.asarray(g["conv"])),
+            ntri=int(np.asarray(g["ntri"])),
+            tri_vec=np.asarray(g["tri_vec"]),
+            tri_vec_sig=np.asarray(g["tri_vec_sig"]),
+        )
+        f.close()
+        verify_checkpoint_compatibility(self, checkpoint_data)
+        return checkpoint_data
 
     def read_pprpa(self, fn):
         print("\nread ppRPA results from %s.\n" % fn)

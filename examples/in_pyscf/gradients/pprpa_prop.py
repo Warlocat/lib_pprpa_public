@@ -75,8 +75,8 @@ mp = pprpaobj(mf, nfrozen_occ, vir_cut)
 mp.kernel(mult)
 mp.analyze()
 istate = 0
-from lib_pprpa import gradient
-den, i_int = gradient.make_rdm1_relaxed_pprpa(mp, mf, mult=mult, istate=istate)
+from lib_pprpa.grad.grad_utils import make_rdm1_relaxed_pprpa, make_rdm1_unrelaxed
+den, i_int = make_rdm1_relaxed_pprpa(mp, mf, mult=mult, istate=istate)
 mo_coeff = mf.mo_coeff
 den = np.einsum('pi,ij,qj->pq', mo_coeff, den, mo_coeff.conj())
 eefg_scf = kernel(mf, dm=mf.make_rdm1())
@@ -106,9 +106,9 @@ print("analytical: ", eefg_rpa.real)
 print("numerical:  ", eefg2)
 
 if mult == "s":
-    den = gradient.make_rdm1_unrelaxed(mp.xy_s[istate], oo_dim, mult=mult, diag=False)
+    den = make_rdm1_unrelaxed(mp.xy_s[istate], oo_dim, mult=mult, diag=False)
 else:
-    den = gradient.make_rdm1_unrelaxed(mp.xy_t[istate], oo_dim, mult=mult, diag=False)
+    den = make_rdm1_unrelaxed(mp.xy_t[istate], oo_dim, mult=mult, diag=False)
 mo_coeff = mo_coeff[:,nfrozen_occ:nfrozen_occ+nocc+nvir]
 den = np.einsum('pi,ij,qj->pq', mo_coeff, den, mo_coeff.conj())
 eefg_rpa = kernel(mf, dm=den)

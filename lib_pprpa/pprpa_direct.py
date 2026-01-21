@@ -485,12 +485,14 @@ class ppRPA_direct():
 
         return
 
-    def check_parameter(self):
+    def check_parameter(self, ignore_multi=False):
         assert self.pp_state >= 0
         assert self.hh_state >= 0
         assert self.nelec in ["n-2", "n+2"]
         assert 0.0 < self.print_thresh < 1.0
-        assert self.multi in ["s", "t"]
+        # Skip the check for get_correlation(), where multi is not set
+        if not ignore_multi:
+            assert self.multi in ["s", "t"]
 
         if self.mu is None:
             self.mu = get_chemical_potential(
@@ -603,7 +605,7 @@ class ppRPA_direct():
         return
 
     def get_correlation(self):
-        self.check_parameter()
+        self.check_parameter(ignore_multi=True)
         start_clock("ppRPA correlation energy")
         if self.ec_s is None:
             self.exci_s, self.xy_s, self.ec_s = diagonalize_pprpa_singlet(
