@@ -3,16 +3,18 @@ Author: Chaoqun Zhang <cq_zhang@outlook.com>
 """
 
 import numpy as np
+import scipy
 from functools import reduce
 from lib_pprpa.pprpa_util import start_clock, stop_clock, GMRES_Pople, GMRES_wrapper
 
 try:
     from socutils.scf import spinor_hf
     from socutils.dft import dft as spinor_dft
+    from socutils.somf import somf_pt
 
-    with_socuils = True
-except:
-    with_socuils = False
+    with_socutils = True
+except ImportError:
+    with_socutils = False
     pass
 
 
@@ -92,6 +94,253 @@ def make_tdm1(xy1, xy2, oo_dim, mult='t'):
         tdm[tdm_o.shape[0] :, tdm_o.shape[1] :] = tdm_v
 
     return tdm, diagonal_correction
+
+def make_tdm1_spin(xy1, xy2, oo_dim1, oo_dim2, mult1, mult2, sz1, sz2):
+    """Make transition density matrix from the XY coefficients."""
+    assert len(xy1) >= oo_dim1
+    occ_y_mat1, vir_x_mat1 = get_xy_full(xy1, oo_dim1, mult1)
+    occ_y_mat2, vir_x_mat2 = get_xy_full(xy2, oo_dim2, mult2)
+    vv_dim = len(xy1) - oo_dim1
+    s1 = 1 if mult1 == 't' else 0
+    s2 = 1 if mult2 == 't' else 0
+
+    if oo_dim1 == 0:
+        return make_tdm1_spin_pp(vir_x_mat1, vir_x_mat2, s1, s2, sz1, sz2)
+    elif vv_dim == 0:
+        return -make_tdm1_spin_pp(occ_y_mat1, occ_y_mat2, s1, s2, sz1, sz2).T
+    else:
+        nocc = occ_y_mat1.shape[0]
+        nvir = vir_x_mat1.shape[0]
+        nmo = nocc + nvir
+        tdm = np.zeros((nmo,nmo), dtype=occ_y_mat1.dtype)
+        tdm[:nocc, :nocc] = -make_tdm1_spin_pp(occ_y_mat1, occ_y_mat2, s1, s2, sz1, sz2).T
+        tdm[nocc:, nocc:] = make_tdm1_spin_pp(vir_x_mat1, vir_x_mat2, s1, s2, sz1, sz2)
+        return tdm
+             
+
+def make_tdm1_spin_pp(x1, x2, s1, s2, m1, m2):
+    # normalization factor
+    x1 = x1 / 2
+    x2 = x2 / 2
+    tdm = x1.T.conj() @ x2 * np.sqrt(2.0) * 2
+
+    conjugate = False
+    if s1 == 0 and s2 == 0:
+        return np.zeros_like(tdm)
+    elif s1 == 1 and s2 == 0:
+        if m1 == 0:
+            return tdm * np.sqrt(2.0)
+        elif m1 == 1:
+            return -tdm
+        elif m1 == -1:
+            return tdm
+    elif s1 == 0 and s2 == 1:
+        conjugate = True
+    elif s1 == 1 and s2 == 1:
+        if abs(m1 - m2) == 2 or (m1==0 and m2==0):
+            return np.zeros_like(tdm)
+        elif m1 == 1 and m2 == 1:
+            return tdm * np.sqrt(2.0)
+        elif m1 == -1 and m2 == -1:
+            return -tdm * np.sqrt(2.0)
+        elif (m1 == 1 and m2 == 0) or (m1 == -1 and m2 == 0):
+            return tdm
+        else:
+            conjugate = True
+    else:
+        raise NotImplementedError
+    if conjugate:
+        return make_tdm1_spin_pp(x2, x1, s2, s1, m2, m1).conj()
+    else:
+        raise ValueError('Unexpected error in make_tdm1_spin_pp.')
+
+
+def contract_soc_tdm(socints_mo, tdm, sz_diff):
+    assert socints_mo.shape[0] == 3
+    assert sz_diff in [0, 1, -1]
+    if sz_diff == 0:
+        res = np.trace(tdm.T @ socints_mo[2])
+    elif sz_diff == 1:
+        res = np.trace(tdm.T @ socints_mo[0] - 1j * tdm.T @ socints_mo[1])
+    elif sz_diff == -1:
+        res = np.trace(tdm.T @ socints_mo[0] + 1j * tdm.T @ socints_mo[1])
+    return 1.0j * res
+
+def qdpt(pprpa, socints_mo, nroot_t=None, nroot_s=None):
+    nroots_s = pprpa.nroot if nroot_s is None else nroot_s
+    nroots_t = pprpa.nroot if nroot_t is None else nroot_t
+    nroots_total = nroots_t*3 + nroots_s
+    mat_qdpt = np.zeros((nroots_total, nroots_total), dtype=np.complex128)
+    nocc = pprpa.nocc
+    oo_dim_s = (nocc + 1) * nocc // 2
+    oo_dim_t = (nocc - 1) * nocc // 2
+    
+    for i in range(nroots_t):
+        for sz in range(-1, 2):
+            pos_t = nroots_s + i*3 + (sz + 1)
+            # <T|H_soc|S>
+            for j in range(nroots_s):
+                pos_s = j
+                tdm_ts = make_tdm1_spin(pprpa.xy_t[i], pprpa.xy_s[j], oo_dim_t, oo_dim_s, 't', 's', sz, 0)
+                soc_me_ts = contract_soc_tdm(socints_mo, tdm_ts, sz)
+                mat_qdpt[pos_t, pos_s] = soc_me_ts
+                mat_qdpt[pos_s, pos_t] = np.conj(soc_me_ts)
+
+            # <T|H_soc|T>
+            for j in range(i + 1):
+                for sz2 in range(-1, 2):
+                    if abs(sz - sz2) > 1:
+                        continue
+                    pos_t2 = nroots_s + j*3 + (sz2 + 1)
+                    tdm_tt = make_tdm1_spin(pprpa.xy_t[i], pprpa.xy_t[j], oo_dim_t, oo_dim_t, 't', 't', sz, sz2)
+                    soc_me_tt = contract_soc_tdm(socints_mo, tdm_tt, sz - sz2)
+                    mat_qdpt[pos_t, pos_t2] = soc_me_tt
+                    mat_qdpt[pos_t2, pos_t] = np.conj(soc_me_tt)
+    
+    for i in range(nroots_s):
+        mat_qdpt[i, i] += pprpa.exci_s[i] if pprpa.channel == "pp" else -pprpa.exci_s[i]
+    for i in range(nroots_t):
+        for sz in range(-1, 2):
+            pos_t = nroots_s + i*3 + (sz + 1)
+            mat_qdpt[pos_t, pos_t] += pprpa.exci_t[i] if pprpa.channel == "pp" else -pprpa.exci_t[i]
+    assert np.allclose(mat_qdpt, mat_qdpt.conj().T)
+    return scipy.linalg.eigh(mat_qdpt)
+
+def get_isc_S_T(mf, pprpa, socints_mo=None, soc_variants="bp1e", print_format="sz", calculate_tt=False):
+    """Calculate the ISC matrix element between <T| H_SOC |S>."""
+    assert pprpa.xy_s is not None and pprpa.xy_t is not None, \
+        "XY coefficients for singlets and triplets are both required to calculate ISC."
+    assert print_format in ["sz", "xyz"]
+    from pyscf.data.nist import HARTREE2WAVENUMBER
+    nocc_act = pprpa.nocc
+    oo_dim_s = (nocc_act + 1) * nocc_act // 2
+    oo_dim_t = (nocc_act - 1) * nocc_act // 2
+    n_singlet = len(pprpa.xy_s)
+    n_triplet = len(pprpa.xy_t)
+
+    if calculate_tt and print_format == "xyz":
+        print("TT xyz format is not implemented yet. Setting print_format to 'sz'.")
+        print_format = "sz"
+
+    if socints_mo is not None:
+        print("Calculating ISC using given SOC integrals.")
+    else:
+        print(f"Calculating ISC using {soc_variants} SOC integrals.")
+        socints_mo = get_soc_integrals(mf, soc_variants=soc_variants)
+        # get the active space integrals
+        nvir_act = pprpa.nvir
+        nocc_tot = mf.mol.nelectron // 2
+        socints_mo = [socints_mo[i][nocc_tot-nocc_act:nocc_tot+nvir_act,nocc_tot-nocc_act:nocc_tot+nvir_act] for i in range(3)]
+        socints_mo = np.array(socints_mo)
+    
+    print("***************************************************************************")
+    print("*            SOC matrix elements <T| H_SOC |S> (in cm^-1)                 *")
+    print("***************************************************************************")
+    if print_format == "sz":
+        print("*  ME   |   <T-1| H_SOC |S>   |   <T 0| H_SOC |S>   |   <T+1| H_SOC |S>   *")
+    else:
+        print("*  ME   |     X-component     |     Y-component     |     Z-component     *")
+    print("*       |    REAL     IMAG    |    REAL     IMAG    |    REAL     IMAG    *")
+    print("***************************************************************************")
+    format_output = f"* {{:6s}}|  {{:8.2f}} {{:8.2f}}  |  {{:8.2f}} {{:8.2f}}  |  {{:8.2f}} {{:8.2f}}  *"
+    results = []
+    for i_t in range(n_triplet):
+        results.append([])
+        for i_s in range(n_singlet):
+            soc_matrix_elements = []
+            for ms in range(-1, 2):
+                tdm_ts = make_tdm1_spin(pprpa.xy_t[i_t], pprpa.xy_s[i_s], oo_dim_t, oo_dim_s, 't', 's', ms, 0)
+                soc_matrix_elements.append(contract_soc_tdm(socints_mo, tdm_ts, ms) * HARTREE2WAVENUMBER)
+            me_name = f"T{i_t}-S{i_s}"
+            if print_format == "sz":
+                print(format_output.format(me_name, 
+                                       soc_matrix_elements[0].real, soc_matrix_elements[0].imag,
+                                       soc_matrix_elements[1].real, soc_matrix_elements[1].imag,
+                                       soc_matrix_elements[2].real, soc_matrix_elements[2].imag))
+            else:
+                soc_matrix_elements.append(( soc_matrix_elements[0] + soc_matrix_elements[2]) / np.sqrt(2.0))
+                soc_matrix_elements.append((-soc_matrix_elements[0] + soc_matrix_elements[2]) / 1.j*np.sqrt(2.0))
+                print(format_output.format(me_name,
+                                       soc_matrix_elements[3].real, soc_matrix_elements[3].imag,
+                                       soc_matrix_elements[4].real, soc_matrix_elements[4].imag,
+                                       soc_matrix_elements[1].real, soc_matrix_elements[1].imag))
+            results[-1].append(soc_matrix_elements[:3])
+
+    if calculate_tt:
+        print("***************************************************************************")
+        print("*            SOC matrix elements <T| H_SOC |T> (in cm^-1)                 *")
+        print("***************************************************************************")
+        if print_format == "sz":
+            print("*  ME   |   <T| H_SOC |T-1>   |   <T| H_SOC |T 0>   |   <T| H_SOC |T+1>   *")
+        else:
+            print("*  ME   |     X-component     |     Y-component     |     Z-component     *")
+        print("*       |    REAL     IMAG    |    REAL     IMAG    |    REAL     IMAG    *")
+        print("***************************************************************************")
+        for i_t in range(n_triplet):
+            for i_ms in range(-1, 2):
+                results.append([])
+                for j_t in range(i_t):
+                    soc_matrix_elements = []
+                    for j_ms in range(-1, 2):
+                        if abs(i_ms - j_ms) > 1:
+                            soc_matrix_elements.append(0.0)
+                            continue
+                        else:
+                            tdm_ts = make_tdm1_spin(pprpa.xy_t[i_t], pprpa.xy_t[j_t], oo_dim_t, oo_dim_t, 't', 't', i_ms, j_ms)
+                            soc_matrix_elements.append(contract_soc_tdm(socints_mo, tdm_ts, i_ms - j_ms) * HARTREE2WAVENUMBER)
+                    me_name = f"T{i_t},{i_ms}-T{j_t}"
+                    if print_format == "sz":
+                        print(format_output.format(me_name, 
+                                               soc_matrix_elements[0].real, soc_matrix_elements[0].imag,
+                                               soc_matrix_elements[1].real, soc_matrix_elements[1].imag,
+                                               soc_matrix_elements[2].real, soc_matrix_elements[2].imag))
+                    else:
+                        raise NotImplementedError("TT matrix elements in xyz format is not implemented yet.")
+                    results[-1].append(soc_matrix_elements[:3])
+    print("***************************************************************************")
+    
+    return results
+
+def get_soc_integrals(mf, mol=None, soc_variants="bp1e"):
+    """Calculate the SOC integrals in the MO basis.
+    available soc_variants: 
+        bp1e: Breit-Pauli one-electron SOC, default option for ISC calculations
+        socecp: spin-orbit effective core potentials
+    if https://github.com/xubwa/socutils installed, the following variants are also available:
+        mfbp: mean-field Breit-Pauli SOC = bp1e + mean-field two-electron spin-same and spin-other SOC
+        x2c1e: exact two-component one-electron SOC, similar to bp1e but more accurate for heavy elements
+        x2cmmf: exact two-component molecular mean-field SOC, similar to mfbp but more accurate for heavy elements
+        x2camf: exact two-component atomic mean-field SOC, efficient approximation to x2cmmf
+    """
+    from pyscf.lib.parameters import LIGHT_SPEED
+    soc_variants = soc_variants.lower()
+    assert soc_variants in ["bp1e", "mfbp", "x2c1e", "x2camf", "x2cmmf", "socecp"],\
+        "Invalid soc_variants. Must be one of ['bp1e', 'mfbp', 'x2c1e', 'x2camf', 'x2cmmf', 'socecp']."
+    
+    if soc_variants != "bp1e" and soc_variants != "socecp" and not with_socutils:
+        raise ImportError("SOC integrals beyond BP-1e require socutils package. Please install it from https://github.com/xubwa/socutils.")
+    
+    if mol is None:
+        mol = mf.mol
+    if soc_variants == "bp1e":
+        nao = mol.nao_nr()
+        socints_ao = mol.intor("int1e_pnucxp").reshape(3, nao, nao) / 2.0 / LIGHT_SPEED**2 / 2.0
+    elif soc_variants == "socecp":
+        socints_ao = mol.intor("ECPso") * 0.5
+    elif soc_variants == "mfbp":
+        socints_ao = somf_pt.get_soc_mf_bp(mf)
+    elif soc_variants == "x2c1e":
+        socints_ao = somf_pt.get_psoc_x2c1e(mol)
+    elif soc_variants == "x2camf":
+        socints_ao = somf_pt.get_psoc_x2camf(mol)
+    elif soc_variants == "x2cmmf":
+        socints_ao = somf_pt.get_psoc_somf(mol, mf.make_rdm1())
+
+    mo_coeff = mf.mo_coeff
+    socints_mo = [mo_coeff.conj().T @ socints_ao[i] @ mo_coeff for i in range(3)]
+    return socints_mo
+    
+
 
 
 def make_rdm2_from_xy_full(occ_y_mat, vir_x_mat):
@@ -906,7 +1155,7 @@ def make_rdm1_relaxed_pprpa(pprpa, mf, xy=None, mult='t', istate=0):
     elif (
         isinstance(mf, scf.ghf.GHF)
         or isinstance(mf, dft.gks.GKS)
-        or (with_socuils and (isinstance(mf, spinor_hf.SpinorSCF) or isinstance(mf, spinor_dft.SpinorDFT)))
+        or (with_socutils and (isinstance(mf, spinor_hf.SpinorSCF) or isinstance(mf, spinor_dft.SpinorDFT)))
     ):
         from lib_pprpa import gpprpa_direct, gpprpa_davidson
 
