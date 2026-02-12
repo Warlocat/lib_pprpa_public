@@ -28,19 +28,22 @@ def kernel(pprpa):
     if getattr(pprpa, "checkpoint_file", None) is not None and Path(pprpa.checkpoint_file).exists():
         checkpoint_data = pprpa._load_pprpa_checkpoint()
         if checkpoint_data is not None:
-            tri_vec = checkpoint_data.tri_vec
-            tri_vec_sig = checkpoint_data.tri_vec_sig
+            tri_size = pprpa.max_vec + pprpa.nroot
+            tri_vec = np.zeros((tri_size, pprpa.full_dim), dtype=data_type)
+            tri_vec_sig = np.zeros(tri_size, dtype=data_type)
             ntri = checkpoint_data.ntri
-            mv_prod = pprpa.contraction(tri_vec)
+            tri_vec[:ntri] = checkpoint_data.tri_vec
+            tri_vec_sig[:ntri] = checkpoint_data.tri_vec_sig
+            mv_prod = np.zeros_like(tri_vec)
+            mv_prod[:ntri] = pprpa.contraction(tri_vec[:ntri])
             nprod = ntri
             normal_setup = False
 
     if normal_setup:
         # the maximum size is max_vec + nroot for compacting
         tri_size = pprpa.max_vec + pprpa.nroot
-        tri_vec = np.zeros(
-            shape=[tri_size, pprpa.full_dim], dtype=data_type)
-        tri_vec_sig = np.zeros(shape=[tri_size], dtype=data_type)
+        tri_vec = np.zeros((tri_size, pprpa.full_dim), dtype=data_type)
+        tri_vec_sig = np.zeros(tri_size, dtype=data_type)
         if pprpa.channel == "pp":
             ntri = min(pprpa.nroot * 4, pprpa.vv_dim)
         else:
@@ -87,8 +90,7 @@ def kernel(pprpa):
             tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
         print("add %d new trial vectors." % (ntri - ntri_old))
         if pprpa.checkpoint_file is not None:
-            pprpa._save_pprpa_checkpoint(conv, ntri, nprod, mv_prod,
-                tri_vec, tri_vec_sig)
+            pprpa._save_pprpa_checkpoint(conv, ntri, tri_vec, tri_vec_sig)
 
         iter += 1
         if conv is True:
@@ -1084,7 +1086,7 @@ class ppRPA_Davidson():
         f.close()
         return
 
-    def _save_pprpa_checkpoint(self, conv, ntri, nprod, mv_prod, tri_vec, tri_vec_sig):
+    def _save_pprpa_checkpoint(self, conv, ntri, tri_vec, tri_vec_sig):
         """triggered by the kernel"""
         fn = self.checkpoint_file
         print("\nSaving intermediate pprpa results to %s.\n" % fn)
@@ -1104,8 +1106,8 @@ class ppRPA_Davidson():
         g["max_vec"] = np.asarray(self.max_vec)
         g["conv"] = np.asarray(conv)
         g["ntri"] = np.asarray(ntri)
-        g["tri_vec"] = np.asarray(tri_vec)
-        g["tri_vec_sig"] = np.asarray(tri_vec_sig)
+        g["tri_vec"] = np.asarray(tri_vec[:ntri])
+        g["tri_vec_sig"] = np.asarray(tri_vec_sig[:ntri])
         f.close()
         return
 
