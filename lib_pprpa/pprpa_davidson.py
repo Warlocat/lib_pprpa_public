@@ -89,7 +89,7 @@ def kernel(pprpa):
             pprpa=pprpa, first_state=first_state, tri_vec=tri_vec,
             tri_vec_sig=tri_vec_sig, mv_prod=mv_prod, v_tri=v_tri)
         print("add %d new trial vectors." % (ntri - ntri_old))
-        if pprpa.checkpoint_file is not None:
+        if pprpa.checkpoint_file and pprpa.update_checkpoint:
             pprpa._save_pprpa_checkpoint(conv, ntri, tri_vec, tri_vec_sig)
 
         iter += 1
@@ -940,6 +940,7 @@ class ppRPA_Davidson():
         if checkpoint_file is not None:
             checkpoint_file += ".h5" if not checkpoint_file.endswith(".h5") else ""
         self.checkpoint_file = checkpoint_file # checkpoint file name
+        self.update_checkpoint = True # whether to update checkpoint file after each iteration
 
         # internal flags
         self.multi = None  # multiplicity
@@ -1012,6 +1013,8 @@ class ppRPA_Davidson():
         # experiment features
         print("_use_Lov = %s" % self._use_Lov)
         print("_compact_subspace = %s" % self._compact_subspace)
+        print("checkpoint_file = %s" % self.checkpoint_file)
+        print("updating checkpoint: %s" % self.update_checkpoint)
         print('')
         return
 
