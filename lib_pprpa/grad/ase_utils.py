@@ -38,28 +38,53 @@ from pyscf.gto.mole import charge
 from pyscf.pbc.tools.pyscf_ase import pyscf_to_ase_atoms
 from lib_pprpa.pprpa_davidson import ppRPA_Davidson
 
-def pprpaobj(mf, channel, nocc=None, nvir=None, mo_eri=False):
+def pprpaobj(mf, channel, **kwargs):
     mo_ene = mf.mo_energy
     mol = mf.mol
-    if nocc is None:
-        nocc = mol.nelectron // 2
-    if nvir is None:
-        nvir = mo_ene.shape[0] - nocc
+
+    nfrozen_occ = kwargs.get("nfrozen_occ", 0)
+    vir_cut = kwargs.get("vir_cut", np.inf)
+    AS_size = kwargs.get("AS_size", None)
+    nocc = kwargs.get("nocc", mol.nelectron // 2)
+    nvir = kwargs.get("nvir", mo_ene.shape[0] - nocc)
+    mo_eri = kwargs.get("mo_eri", False)
+    nroot = kwargs.get("nroot", 1)
+    checkpoint = kwargs.get("checkpoint", None)
+    max_mem = kwargs.get("max_mem", None)
+    trial = kwargs.get("trial", "identity")
+    full_nocc = nocc
     nmo = nocc + nvir
-    mo_energy = mo_ene[mol.nelectron//2 - nocc:mol.nelectron//2 + nvir]
-    mo_coeff = mf.mo_coeff[:,mol.nelectron//2 - nocc:mol.nelectron//2 + nvir]
-    
-    pprpa = ppRPA_Davidson(nocc, mo_energy, Lpq=None, channel=channel, nroot=1, residue_thresh=1e-12)
+
+    # create active space by explicitly excluding number of occupied orbitals or by vir energy cutoff
+    if nfrozen_occ > 0  or vir_cut < np.inf:
+        if AS_size is not None:
+            raise ValueError("Cannot specify both nfrozen_occ/vir_cut and AS_size")
+        nvir -= np.sum(mo_ene > vir_cut)
+        nocc -= nfrozen_occ
+        assert nocc > 1, "Too many frozen occupied orbitals!"
+        assert nvir > 1, "Too many excluded virtual orbitals!"
+    # create active space by explicitly setting the size of the active space
+    elif AS_size is not None and (AS_size < full_nocc or AS_size < nvir):
+        nvir = min(nvir, AS_size)
+        nfrozen_occ = full_nocc - min(full_nocc, AS_size)
+        nocc = full_nocc - nfrozen_occ
+
+    vir_act_idx = full_nocc + nvir
+    mo_energy = mo_ene[nfrozen_occ:vir_act_idx]
+
+    pprpa = ppRPA_Davidson(nocc, mo_energy, Lpq=None, channel=channel, nroot=nroot, residue_thresh=1e-12, checkpoint_file=checkpoint, trial=trial)
     pprpa.cell = mol
 
     # One can use either the MO eri or the ao direct approach.
     # For small active spaces, MO eri should be faster.
     if mo_eri:
-        eri = mf.with_df.get_mo_eri(mo_coeff, compact=False)
+        if max_mem is not None:
+            mf.with_df.max_memory = max_mem
+        eri = mf.with_df.get_mo_eri(mf.mo_coeff, compact=False)
         eri = eri.reshape(nmo, nmo, nmo, nmo).transpose(0, 2, 1, 3)
-        vvvv = np.ascontiguousarray(eri[nocc:, nocc:, nocc:, nocc:])
-        oovv = np.ascontiguousarray(eri[:nocc, :nocc, nocc:, nocc:])
-        oooo = np.ascontiguousarray(eri[:nocc, :nocc, :nocc, :nocc])
+        vvvv = eri[full_nocc:vir_act_idx, full_nocc:vir_act_idx, full_nocc:vir_act_idx, full_nocc:vir_act_idx]
+        oovv = eri[nfrozen_occ:full_nocc, nfrozen_occ:full_nocc, full_nocc:vir_act_idx, full_nocc:vir_act_idx]
+        oooo = eri[nfrozen_occ:full_nocc, nfrozen_occ:full_nocc, nfrozen_occ:full_nocc, nfrozen_occ:full_nocc]
         pprpa.use_eri(vvvv, oovv, oooo)
     else:
         pprpa._ao_direct = True
@@ -68,40 +93,29 @@ def pprpaobj(mf, channel, nocc=None, nvir=None, mo_eri=False):
     pprpa.mu = 0.0
     return pprpa
 
-def pprpa_energy(cell):
-    mf = cell.RKS(xc="pbe")
+def pprpa_energy(cell, with_extras=False, **kwargs):
+    mf = cell.RKS(xc=kwargs.get("xc", "pbe"))
     mf.exxdiv = None
-    mf.conv_tol = 1e-12
+    mf.conv_tol = kwargs.get("conv_tol", 1e-8)
+    mf.chkfile = kwargs.get("chkfile", None)
+    mf.init_guess = "chk" if mf.chkfile is not None else "minao"
     mf.kernel()
     e = mf.e_tot
 
-    istate = 0
-    mult = 't'
-    nroot = 3
-    mp = pprpaobj(mf, "pp")
-    mp.nroot = nroot
+    istate = kwargs.get("istate", 0)
+    mult = kwargs.get("mult", "t")
+    channel = kwargs.pop("channel", "pp")
+    mp = pprpaobj(mf, channel, **kwargs)
     mp.kernel(mult)
     mp.analyze()
     e_pprpa = mp.exci_s[istate] if mult == 's' else mp.exci_t[istate]
     e = e + e_pprpa if mp.channel == "pp" else e - e_pprpa
+    if with_extras:
+        return e, mp, mf, mult, istate
     return e
 
-def pprpa_grad(cell):
-    mf = cell.RKS(xc="pbe")
-    mf.exxdiv = None
-    mf.conv_tol = 1e-12
-    mf.kernel()
-    e = mf.e_tot
-
-    istate = 0
-    mult = 't'
-    nroot = 3
-    mp = pprpaobj(mf, "pp")
-    mp.nroot = nroot
-    mp.kernel(mult)
-    mp.analyze()
-    e_pprpa = mp.exci_s[istate] if mult == 's' else mp.exci_t[istate]
-    e = e + e_pprpa if mp.channel == "pp" else e - e_pprpa
+def pprpa_grad(cell, **kwargs):
+    e, mp, mf, mult, istate = pprpa_energy(cell, with_extras=True, **kwargs)
     from lib_pprpa.grad import pprpa_gamma
     mpg = mp.Gradients(mf, mult, istate)
     mpg.kernel()
@@ -122,6 +136,7 @@ class ASE_calculator(Calculator):
         self.cell = cell
         self.grad_func = grad_func
         self.ene_func = ene_func
+        self.kwargs = kwargs
 
     def set(self, **kwargs):
         changed_parameters = Calculator.set(self, **kwargs)
@@ -146,20 +161,20 @@ class ASE_calculator(Calculator):
         with_energy = with_grad or 'energy' in properties
 
         if with_energy and with_grad:
-            e_tot, grad = self.grad_func(self.cell)
+            e_tot, grad = self.grad_func(self.cell, **self.kwargs)
             self.results['energy'] = e_tot * HARTREE2EV
             self.results['forces'] = -grad * (HARTREE2EV / BOHR)
         elif with_energy:
-            e_tot = self.ene_func(self.cell)
+            e_tot = self.ene_func(self.cell, **self.kwargs)
             self.results['energy'] = e_tot * HARTREE2EV
         else:
             raise NotImplementedError("Only energy and forces are implemented for ppRPA calculator.")
         
-def kernel(cell, grad_func, ene_func=None, logfile=None, fmax=0.05, max_steps=100):
+def kernel(cell, grad_func, ene_func=None, logfile=None, fmax=0.05, max_steps=100, **kwargs):
     '''Optimize the geometry using ASE.
     '''
     atoms = pyscf_to_ase_atoms(cell)
-    atoms.calc = ASE_calculator(cell, grad_func=grad_func, ene_func=ene_func)
+    atoms.calc = ASE_calculator(cell, grad_func=grad_func, ene_func=ene_func, **kwargs)
     if logfile is None:
         logfile = '-' # stdout
 
