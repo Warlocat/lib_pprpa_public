@@ -1451,7 +1451,7 @@ def _contract_xc_kernel(mf, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=Tr
     return f1vo, f1oo, v1ao, k1ao
 
 
-def get_veff_krks(ks_grad, dm=None, kpts=None):
+def get_veff_krks(ks_grad, dm=None, kpts=None, ao_cache=None):
     from pyscf.pbc.grad.krks import get_vxc
     mf = ks_grad.base
     cell = ks_grad.cell
@@ -1473,11 +1473,12 @@ def get_veff_krks(ks_grad, dm=None, kpts=None):
         raise NotImplementedError
     else:
         vxc = get_vxc(ni, cell, grids, mf.xc, dm, kpts,
-                           max_memory=max_memory, verbose=ks_grad.verbose)
+                           max_memory=max_memory, verbose=ks_grad.verbose,
+                           ao_cache=ao_cache)
 
     t0 = logger.timer(ks_grad, 'vxc', *t0)
     if not ni.libxc.is_hybrid_xc(mf.xc):
-        vjk = ks_grad.get_j(dm, kpts)
+        vjk = ks_grad.get_j(dm, kpts, ao_cache=ao_cache)
     else:
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=cell.spin)
         vj, vk = ks_grad.get_jk(dm, kpts)
@@ -1490,7 +1491,7 @@ def get_veff_krks(ks_grad, dm=None, kpts=None):
     return vxc, vjk
 
 
-def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000):
+def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000, ao_cache=None):
     from pyscf import lib
     from pyscf.lib import logger
     from pyscf.grad.tdrks import _lda_eval_mat_, _gga_eval_mat_, _mgga_eval_mat_
@@ -1529,7 +1530,7 @@ def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000):
     else:
         raise NotImplementedError(f'td-rks for functional {xc_code}')
 
-    for aok0, aok1, mask, weight, coords in ni.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory):
+    for aok0, aok1, mask, weight, coords in ni.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory, ao_cache=ao_cache):
         aok0 = aok0[0]
         if xctype == 'LDA':
             ao0 = aok0[0]
@@ -1552,3 +1553,4 @@ def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000):
     if k1ao is not None:
         k1ao[1:] *= -1
     return f1vo, f1oo, v1ao, k1ao
+

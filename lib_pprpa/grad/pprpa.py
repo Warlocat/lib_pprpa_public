@@ -164,7 +164,7 @@ def grad_elec_mf(mf, atmlst=None):
     return de
 
 
-def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20, cphf_conv_tol=1.0e-8):
+def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20, cphf_conv_tol=1.0e-8, vresp=None):
     r"""Calculate relaxed density matrix (and the I intermediates)
         for given pprpa and mean-field object.
     Args:
@@ -211,14 +211,21 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
     orbi = mf.mo_coeff[:, slice_i]
     orba = mf.mo_coeff[:, slice_a]
     occ_y_mat, vir_x_mat = get_xy_full(xy, oo_dim, mult)
-    if pprpa._use_eri or pprpa._ao_direct:
+    if pprpa._use_eri and not hasattr(mf, 'cell'):
+        # molecular fast path: contract 2-RDM with stored MO ERIs directly
+        _, mo_ene_full, eri_full = pyscf_util.get_pyscf_input_mol_eri_r(mf, return_raw=True)
+        eri_oo = np.ascontiguousarray(eri_full[:, slice_p, slice_i, slice_i])
+        eri_vv = np.ascontiguousarray(eri_full[:, slice_p, slice_a, slice_a])
+        eri_full = None
+        X_eri = np.matmul(eri_vv.reshape(-1, nvir*nvir), vir_x_mat.reshape(-1)).reshape(-1, nocc+nvir)
+        Y_eri = np.matmul(eri_oo.reshape(-1, nocc*nocc), occ_y_mat.reshape(-1)).reshape(-1, nocc+nvir)
+    elif pprpa._use_eri or pprpa._ao_direct:
         hermi = 1 if mult == 's' else 2
         mo_ene_full = mf.mo_energy
         X_ao = orba @ vir_x_mat @ orba.T
-        X_eri = mf.get_k(dm=X_ao, hermi=hermi)
-        X_eri = mf.mo_coeff.T @ X_eri @ orbp
         Y_ao = orbi @ occ_y_mat @ orbi.T
-        Y_eri = mf.get_k(dm=Y_ao, hermi=hermi)
+        X_eri, Y_eri = mf.get_k(dm=np.stack((X_ao, Y_ao)), hermi=hermi)
+        X_eri = mf.mo_coeff.T @ X_eri @ orbp
         Y_eri = mf.mo_coeff.T @ Y_eri @ orbp
     else:
         if nfrozen_occ > 0 or nfrozen_vir > 0:
@@ -228,7 +235,8 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
             Lpq_full = pprpa.Lpq
 
     # set singlet=None, generate function for CPHF type response kernel
-    vresp = mf.gen_response(singlet=None, hermi=1)
+    if vresp is None:
+        vresp = mf.gen_response(singlet=None, hermi=1)
     den_u = make_rdm1_unrelaxed_from_xy_full(occ_y_mat, vir_x_mat)
     den_u_ao = np.einsum('pi,i,qi->pq', orbp, den_u, orbp, optimize=True)
     veff_den_u = reduce(np.dot, (mf.mo_coeff.T, vresp(den_u_ao) * 2, mf.mo_coeff))
