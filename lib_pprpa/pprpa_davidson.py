@@ -18,10 +18,12 @@ def kernel(pprpa):
     elif pprpa._ao_direct:
         data_type = np.double
     else:
-        if pprpa._use_Lov:
-            data_type = pprpa.Lpi.dtype
+        if pprpa.Loo is not None:
+            data_type = pprpa.Loo.dtype
+        elif pprpa.Lvv is not None:
+            data_type = pprpa.Lvv.dtype
         else:
-            data_type = pprpa.Lpq.dtype
+            raise ValueError("No valid data type found.")
 
     normal_setup = True
     # gpprpa_davidson does not have checkpoint_file attribute, but uses this kernel
@@ -257,14 +259,17 @@ def get_subspace_trial_vector(pprpa, ntri, channel=None, nocc_sub=40, nvir_sub=4
         print("Use identity trial vectors instead.")
         return get_identity_trial_vector(pprpa, ntri)
 
-    start, end = pprpa.nocc - nocc_sub, pprpa.nocc + nvir_sub
-    mo_energy_sub = pprpa.mo_energy[start:end]
-    if pprpa._use_Lov is True:
-        Lpq_sub = np.concatenate(
-            (pprpa.Lpi[:, :, start:], pprpa.Lpa[:, :, :nvir_sub]), axis=2)
-        Lpq_sub = Lpq_sub[:, start:end, :]
-    else:
-        Lpq_sub = pprpa.Lpq[:, start:end, start:end]
+    mo_energy_sub = pprpa.mo_energy[pprpa.nocc - nocc_sub : pprpa.nocc + nvir_sub]
+    if nocc_sub > 0 and nvir_sub > 0:
+        Lpo = np.concatenate([pprpa.Loo[:, pprpa.nocc - nocc_sub :], pprpa.Lvo[:, :nvir_sub]], axis=1)
+        Lpv = np.concatenate([pprpa.Lov[:, pprpa.nocc - nocc_sub :], pprpa.Lvv[:, :nvir_sub]], axis=1)
+        Lpq_sub = np.concatenate([Lpo[:, :, pprpa.nocc - nocc_sub :], Lpv[:, :, :nvir_sub]], axis=2)
+        del Lpo, Lpv
+    elif nocc_sub == 0:
+        Lpq_sub = pprpa.Lvv[:, :nvir_sub, :nvir_sub]
+    elif nvir_sub == 0:
+        Lpq_sub = pprpa.Loo[:, pprpa.nocc - nocc_sub :, pprpa.nocc - nocc_sub :]
+
     if pprpa.multi == "s":
         xy_sub = diagonalize_pprpa_singlet(nocc_sub, mo_energy_sub, Lpq_sub, mu=pprpa.mu)[1]
     else:
@@ -305,19 +310,21 @@ def get_subspace_trial_vector(pprpa, ntri, channel=None, nocc_sub=40, nvir_sub=4
 def _pprpa_contraction(pprpa, tri_vec):
     """ppRPA contraction.
 
-    Args:
-        pprpa (ppRPA_Davidson): ppRPA_Davidson object.
-        tri_vec (double ndarray): trial vector.
+    Parameters
+    ----------
+    pprpa : ppRPA_Davidson
+        ppRPA_Davidson object.
+    tri_vec : double ndarray
+        Trial vector.
 
-    Returns:
-        mv_prod (double ndarray): product between ppRPA matrix and trial vectors.
+    Returns
+    -------
+    mv_prod : double ndarray
+        Product between ppRPA matrix and trial vectors.
     """
-    nocc, nvir, nmo = pprpa.nocc, pprpa.nvir, pprpa.nmo
+    nocc, nvir = pprpa.nocc, pprpa.nvir
     naux = pprpa.naux
     mo_energy = pprpa.mo_energy
-    Lpq = pprpa.Lpq
-    Lpi = pprpa.Lpi
-    Lpa = pprpa.Lpa
 
     ntri = tri_vec.shape[0]
     mv_prod = np.zeros(shape=[ntri, pprpa.full_dim], dtype=np.double)
@@ -329,13 +336,23 @@ def _pprpa_contraction(pprpa, tri_vec):
     z_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
     z_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
 
+    oLo_z = np.zeros(shape=[nocc * naux, nocc], dtype=np.double)
+    oLv_z = np.zeros(shape=[nocc * naux, nvir], dtype=np.double)
+    vLo_z = np.zeros(shape=[nvir * naux, nocc], dtype=np.double)
+    vLv_z = np.zeros(shape=[nvir * naux, nvir], dtype=np.double)
+
+    prod_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
+    prod_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
+
     if not pprpa._ao_direct: # Lpq or eri
         for ivec in range(ntri):
             # restore trial vector into full matrix
             z_oo[tri_row_o, tri_col_o] = tri_vec[ivec][: pprpa.oo_dim]
-            z_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+            # z_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+            scipy.linalg.blas.dscal(a=1.0 / np.sqrt(2), x=z_oo.ravel(), n=nocc, offx=0, incx=nocc + 1)
             z_vv[tri_row_v, tri_col_v] = tri_vec[ivec][pprpa.oo_dim :]
-            z_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
+            # z_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
+            scipy.linalg.blas.dscal(a=1.0 / np.sqrt(2), x=z_vv.ravel(), n=nvir, offx=0, incx=nvir + 1)
 
             if pprpa._use_eri:
                 prod_vv = np.zeros((nvir*nvir, 1))
@@ -349,29 +366,114 @@ def _pprpa_contraction(pprpa, tri_vec):
                     prod_oo += np.matmul(pprpa.oovv.reshape(nocc*nocc, nvir*nvir), z_vv.T.reshape(nvir*nvir, 1))
                 prod_vv = prod_vv.reshape(nvir, nvir)
                 prod_oo = prod_oo.reshape(nocc, nocc)
-            else: # use Lpq
+            else:
+                # version 1: using einsum, slow but indexes are easy to understand
                 # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
-                Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
-                if pprpa._use_Lov is True:
-                    Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
-                    Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
-                else:
-                    Lpq_z[:, :nocc] = Lpq[:, :, :nocc].reshape(naux * nmo, nocc) @ z_oo.T
-                    Lpq_z[:, nocc:] = Lpq[:, :, nocc:].reshape(naux * nmo, nvir) @ z_vv.T
+                # Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
+                # Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
+                # Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
+                # version 2: using np.matmul, faster, helpful to understand version 3
+                # np.matmul(pprpa.oLo.reshape(nocc * naux, nocc), z_oo.T, out=oLo_z)
+                # np.matmul(pprpa.oLv.reshape(nocc * naux, nvir), z_vv.T, out=oLv_z)
+                # np.matmul(pprpa.vLo.reshape(nvir * naux, nocc), z_oo.T, out=vLo_z)
+                # np.matmul(pprpa.vLv.reshape(nvir * naux, nvir), z_vv.T, out=vLv_z)
 
+                # version 3: using BLAS, fastest
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=z_oo.T,
+                    b=pprpa.oLo.reshape(nocc * naux, nocc).T,
+                    c=oLo_z.T,
+                    beta=0.0,
+                    overwrite_c=True,
+                    trans_a=True,
+                    trans_b=False
+                )
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=z_vv.T,
+                    b=pprpa.oLv.reshape(nocc * naux, nvir).T,
+                    c=oLv_z.T,
+                    beta=0.0,
+                    overwrite_c=True,
+                    trans_a=True,
+                    trans_b=False
+                )
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=z_oo.T,
+                    b=pprpa.vLo.reshape(nvir * naux, nocc).T,
+                    c=vLo_z.T,
+                    beta=0.0,
+                    overwrite_c=True,
+                    trans_a=True,
+                    trans_b=False
+                )
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=z_vv.T,
+                    b=pprpa.vLv.reshape(nvir * naux, nvir).T,
+                    c=vLv_z.T,
+                    beta=0.0,
+                    overwrite_c=True,
+                    trans_a=True,
+                    trans_b=False
+                )
+
+                # version 1: using einsum, slow but indexes are easy to understand
                 # transpose and reshape for faster multiplication
-                Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
-                Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
-                # NOTE: here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
-                if pprpa._use_Lov is True:
-                    prod_oo = Lpq_z[:nocc] @ Lpi.reshape(naux * nmo, nocc)
-                else:
-                    prod_oo = Lpq_z[:nocc] @ Lpq[:, :, :nocc].reshape(naux * nmo, nocc)
-                if pprpa._use_Lov is True:
-                    prod_vv = Lpq_z[nocc:] @ Lpa.reshape(naux * nmo, nvir)
-                else:
-                    prod_vv = Lpq_z[nocc:] @ Lpq[:, :, nocc:].reshape(naux * nmo, nvir)
+                # Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
+                # Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
+                # here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
+                # prod_oo = Lpq_z[:nocc] @ Lpi.reshape(naux * nmo, nocc)
+                # prod_vv = Lpq_z[nocc:] @ Lpa.reshape(naux * nmo, nvir)
+                # version 2: using np.matmul, faster, helpful to understand version 3
+                # prod_oo = oLo_z.reshape(nocc, -1) @ pprpa.Loo.reshape(naux * nocc, nocc)
+                # prod_oo += oLv_z.reshape(nocc, -1) @ pprpa.Lvo.reshape(naux * nvir, nocc)
+                # prod_vv = vLo_z.reshape(nvir, -1) @ pprpa.Lov.reshape(naux * nocc, nvir)
+                # prod_vv += vLv_z.reshape(nvir, -1) @ pprpa.Lvv.reshape(naux * nvir, nvir)
 
+                # version 3: using BLAS, fastest
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=pprpa.Loo.reshape(naux * nocc, nocc).T,
+                    b=oLo_z.reshape(nocc, -1).T,
+                    c=prod_oo.T,
+                    beta=0.0,
+                    overwrite_c=True,
+                    trans_a=False,
+                    trans_b=False
+                )
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=pprpa.Lvo.reshape(naux * nvir, nocc).T,
+                    b=oLv_z.reshape(nocc, -1).T,
+                    c=prod_oo.T,
+                    beta=1.0,
+                    overwrite_c=True,
+                    trans_a=False,
+                    trans_b=False
+                )
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=pprpa.Lov.reshape(naux * nocc, nvir).T,
+                    b=vLo_z.reshape(nvir, -1).T,
+                    c=prod_vv.T,
+                    beta=0.0,
+                    overwrite_c=True,
+                    trans_a=False,
+                    trans_b=False
+                )
+                scipy.linalg.blas.dgemm(
+                    alpha=1.0,
+                    a=pprpa.Lvv.reshape(naux * nvir, nvir).T,
+                    b=vLv_z.reshape(nvir, -1).T,
+                    c=prod_vv.T,
+                    beta=1.0,
+                    overwrite_c=True,
+                    trans_a=False,
+                    trans_b=False
+                )
 
             if pprpa.multi == "s":
                 prod_vv += prod_vv.T
@@ -380,13 +482,13 @@ def _pprpa_contraction(pprpa, tri_vec):
                 prod_vv -= prod_vv.T
                 prod_oo -= prod_oo.T
             # rotate upper-half to lower-half matrix
-            prod_oo = prod_oo.T
-            prod_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
-            prod_vv = prod_vv.T
-            prod_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
+            prod_oo_T = prod_oo.T
+            prod_oo_T[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
+            prod_vv_T = prod_vv.T
+            prod_vv_T[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
 
-            mv_prod[ivec][: pprpa.oo_dim] = prod_oo[tri_row_o, tri_col_o]
-            mv_prod[ivec][pprpa.oo_dim :] = prod_vv[tri_row_v, tri_col_v]
+            mv_prod[ivec][: pprpa.oo_dim] = prod_oo_T[tri_row_o, tri_col_o]
+            mv_prod[ivec][pprpa.oo_dim :] = prod_vv_T[tri_row_v, tri_col_v]
     else:
         dms = []
         assert pprpa._scf is not None, "SCF object is required for eri_ao_direct contraction."
@@ -718,6 +820,7 @@ def _pprpa_compact_space(pprpa, first_state, tri_vec, tri_vec_sig, mv_prod, v_tr
 
     return ntri
 
+
 # analysis functions
 def _pprpa_print_eigenvector(
         multi, nocc, nvir, thresh, channel, exci0, exci, xy,
@@ -873,6 +976,7 @@ def _analyze_pprpa_davidson(
 
     return res # either None or (tdm, vee)
 
+
 @dataclass
 class PPRPAIntermediates:
     """Container for the Davidson algorithm intermediates."""
@@ -880,7 +984,6 @@ class PPRPAIntermediates:
     nvir: int
     # _use_eri: bool
     # _ao_direct: bool
-    _use_Lov: bool
     nroot: int
     max_vec: int
     conv: bool
@@ -891,21 +994,22 @@ class PPRPAIntermediates:
     tri_vec: np.ndarray
     tri_vec_sig: np.ndarray
 
+
 def verify_checkpoint_compatibility(pprpa, checkpoint_data: PPRPAIntermediates):
     """Verify that the checkpoint data is compatible with the ppRPA instance.
-    
+
     Args:
         pprpa (PPRPA): The ppRPA instance.
         checkpoint_data (PPRPAIntermediates): The checkpoint data.
-    
+
     Note: some of the data does not need to match because it isn't set in the ppRPA instance yet
     """
     assert pprpa.nocc == checkpoint_data.nocc
     assert pprpa.nvir == checkpoint_data.nvir
     # assert pprpa._use_eri == checkpoint_data._use_eri
     # assert pprpa._ao_direct == checkpoint_data._ao_direct
-    assert pprpa._use_Lov == checkpoint_data._use_Lov
     assert pprpa.channel == checkpoint_data.channel
+
 
 class ppRPA_Davidson():
     def __init__(
@@ -917,9 +1021,17 @@ class ppRPA_Davidson():
         self.mo_energy = np.asarray(mo_energy)  # orbital energy
         # three-center density-fitting matrix in MO space
         self.Lpq = np.asarray(Lpq) if Lpq is not None else None
-        self._use_Lov = False  # use C-contiguous Lpq block for better performance
-        self.Lpi = None  # Lpi = Lpq[:, :, :nocc], C-contiguous
-        self.Lpa = None  # Lpa = Lpq[:, :, nocc:], C-contiguous
+
+        # TEST
+        self.Loo = None
+        self.Lov = None
+        self.Lvo = None
+        self.Lvv = None
+        self.oLo = None
+        self.vLo = None
+        self.oLv = None
+        self.vLv = None
+
         self._use_eri = False # use four-index ERI tensor directly
         self._ao_direct = False # use four-index from fock builder
         self.mo_coeff = None # molecular orbital coefficients
@@ -1011,7 +1123,6 @@ class ppRPA_Davidson():
         print('residue threshold = %.3e' % self.residue_thresh)
         print('print threshold = %.2f%%' % (self.print_thresh*100))
         # experiment features
-        print("_use_Lov = %s" % self._use_Lov)
         print("_compact_subspace = %s" % self._compact_subspace)
         print("checkpoint_file = %s" % self.checkpoint_file)
         print("updating checkpoint: %s" % self.update_checkpoint)
@@ -1036,7 +1147,7 @@ class ppRPA_Davidson():
         else:
             print("ppRPA needs at least %.1f GB memory." % (mem / 1.0e3))
         return
-    
+
     def use_eri(self, eri_vvvv, eri_oovv, eri_oooo):
         """Use ERI instead of Lpq."""
         """ERI symmetry <pq|rs>"""
@@ -1050,10 +1161,15 @@ class ppRPA_Davidson():
         self.multi = multi
         self.check_parameter()
 
-        # TODO: directly take Lpi and Lpa in the future
-        if self._use_Lov is True and self.Lpq is not None:
-            self.Lpi = np.ascontiguousarray(self.Lpq[:, :, :self.nocc])
-            self.Lpa = np.ascontiguousarray(self.Lpq[:, :, self.nocc:])
+        if self.Loo is None or self.Lvv is None:
+            self.Loo = np.ascontiguousarray(self.Lpq[:, :self.nocc, :self.nocc])
+            self.Lvv = np.ascontiguousarray(self.Lpq[:, self.nocc:, self.nocc:])
+            self.Lov = np.ascontiguousarray(self.Lpq[:, :self.nocc, self.nocc:])
+            self.Lvo = np.ascontiguousarray(self.Lpq[:, self.nocc:, :self.nocc])
+            self.oLo = np.ascontiguousarray(self.Loo.transpose(1, 0, 2))
+            self.vLo = np.ascontiguousarray(self.Lvo.transpose(1, 0, 2))
+            self.oLv = np.ascontiguousarray(self.Lov.transpose(1, 0, 2))
+            self.vLv = np.ascontiguousarray(self.Lvv.transpose(1, 0, 2))
             self.Lpq = None
 
         self.dump_flags()
@@ -1104,7 +1220,6 @@ class ppRPA_Davidson():
         g["trial"] = np.asarray(0 if self.trial == "identity" else 1)
         # g["_use_eri"] = np.asarray(self._use_eri)
         # g["_ao_direct"] = np.asarray(self._ao_direct)
-        g["_use_Lov"] = np.asarray(self._use_Lov)
         g["nroot"] = np.asarray(self.nroot)
         g["max_vec"] = np.asarray(self.max_vec)
         g["conv"] = np.asarray(conv)
@@ -1136,7 +1251,6 @@ class ppRPA_Davidson():
             trial="identity" if int(np.asarray(g["trial"])) == 0 else "subspace",
             # _use_eri=bool(np.asarray(g["_use_eri"])),
             # _ao_direct=bool(np.asarray(g["_ao_direct"])),
-            _use_Lov=bool(np.asarray(g["_use_Lov"])),
             nroot=int(np.asarray(g["nroot"])),
             max_vec=int(np.asarray(g["max_vec"])),
             conv=bool(np.asarray(g["conv"])),
@@ -1170,7 +1284,7 @@ class ppRPA_Davidson():
             exci_s=self.exci_s, xy_s=self.xy_s, exci_t=self.exci_t,
             xy_t=self.xy_t, nocc=self.nocc, nvir=self.nvir,
             print_thresh=self.print_thresh, channel=self.channel, mo_dip=self.mo_dip)
-        
+
         if results is not None:
             self.tdm, self.vee = results
         return
