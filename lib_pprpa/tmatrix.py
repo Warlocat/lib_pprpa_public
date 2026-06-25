@@ -70,16 +70,25 @@ def get_transition_density(multi, nocc, nvir, xy, Lpq):
 
     if is_singlet:
         oo_dim = (nocc + 1) * nocc // 2
-        vv_dim = (nvir + 1) * nvir // 2
         tri_row_o, tri_col_o = np.tril_indices(nocc)
         tri_row_v, tri_col_v = np.tril_indices(nvir)
     else:
         oo_dim = (nocc - 1) * nocc // 2
-        vv_dim = (nvir - 1) * nvir // 2
         tri_row_o, tri_col_o = np.tril_indices(nocc, -1)
         tri_row_v, tri_col_v = np.tril_indices(nvir, -1)
 
     rho = np.zeros((nroot, nmo, nmo))
+
+    L_occ = Lpq[:, :, :nocc]
+    L_vir = Lpq[:, :, nocc:]
+
+    # Pre-transpose and reshape L_occ and L_vir for contractions
+    L_occ_T = np.ascontiguousarray(L_occ.transpose(1, 0, 2)).reshape(nmo, -1)
+    L_vir_T = np.ascontiguousarray(L_vir.transpose(1, 0, 2)).reshape(nmo, -1)
+
+    T_oo = np.zeros((nmo, naux * nocc))
+    T_vv = np.zeros((nmo, naux * nvir))
+    term1 = np.zeros((nmo, nmo))
 
     for m in range(nroot):
         xy_m = xy[m]
@@ -88,31 +97,10 @@ def get_transition_density(multi, nocc, nvir, xy, Lpq):
         # hh block (Y): xy_m[:oo_dim] -> Y_full[i, j]
         # pp block (X): xy_m[oo_dim:] -> X_full[a, b]
         Y_full = np.zeros((nocc, nocc))
-        if oo_dim > 0:
-            Y_full[tri_row_o, tri_col_o] = xy_m[:oo_dim]
+        Y_full[tri_row_o, tri_col_o] = xy_m[:oo_dim]
 
         X_full = np.zeros((nvir, nvir))
-        if vv_dim > 0:
-            X_full[tri_row_v, tri_col_v] = xy_m[oo_dim:]
-
-        # Compute intermediate T[P, p, r] = sum_{s} L_{P,p,s} * XY_{r,s}
-        # where (r, s) are pairs from the ppRPA eigenvector
-        # The T-matrix transition density:
-        #   rho_m(p, q) = sum_{P,r} L_{P,p,r} * T_{P,q,r}
-        #               + pm * sum_{P,r} L_{P,q,r} * T_{P,p,r}
-        # First step: contract eigenvector with Lpq to get intermediate
-        # T[P, p] = sum_s L_{P, p, s} * XY_{r, s}  (for each r)
-
-        # Build the full pairing amplitude matrix in MO space:
-        # XY_full[r, s] combines both hh and pp blocks
-        # For occupied r, s: XY_full = Y_full / sqrt(2) (the 1/sqrt(2) is from Du Zhang's code)
-        # For virtual r, s:  XY_full = X_full / sqrt(2)
-
-        # We contract in two separate blocks: occ-occ and vir-vir
-
-        # Intermediate: for each auxiliary index P, compute
-        #   T_oo[P, p] = sum_{i} L_{P, p, i} * sum_{j<=i} XY[j<->i] * D_{ij} / sqrt(2) where j < i (or j<=i)
-        # In practice we expand to full matrix and contract
+        X_full[tri_row_v, tri_col_v] = xy_m[oo_dim:]
 
         # Scale diagonal elements for singlet
         Y_scaled = Y_full.copy()
@@ -122,38 +110,65 @@ def get_transition_density(multi, nocc, nvir, xy, Lpq):
             np.fill_diagonal(X_scaled, X_scaled.diagonal() / np.sqrt(2.0))
 
         # Divide by sqrt(2) as in the C code (from Du Zhang's original code)
-        Y_scaled /= np.sqrt(2.0)
-        X_scaled /= np.sqrt(2.0)
+        scipy.linalg.blas.dscal(a=1.0 / np.sqrt(2.0), x=Y_scaled.ravel())
+        scipy.linalg.blas.dscal(a=1.0 / np.sqrt(2.0), x=X_scaled.ravel())
 
-        # T_oo[P, p, i] = sum_j L[P, p, j] * Y_scaled[i, j]
-        # -> T_oo has shape (naux, nmo, nocc) but we only need the contracted form
-        # rho_m(p, q) = sum_{P, i} [L[P,p,i] * (sum_j L[P,q,j] * Y_scaled[i,j])
-        #                         + pm * L[P,q,i] * (sum_j L[P,p,j] * Y_scaled[i,j])]
-        #             + same for vir block with X_scaled
+        # Contract using matrix multiplication (BLAS GEMM) for efficiency
+        # T_oo[P, q, i] = sum_j L_occ[P, q, j] * Y_scaled[i, j]
+        # T_oo = (L_occ_T.reshape(-1, nocc) @ Y_scaled.T).reshape(nmo, -1)
+        scipy.linalg.blas.dgemm(
+            alpha=1.0,
+            a=Y_scaled.T,
+            b=L_occ_T.reshape(-1, nocc).T,
+            beta=0.0,
+            c=T_oo.reshape(-1, nocc).T,
+            trans_a=True,
+            trans_b=False,
+            overwrite_c=True,
+        )
 
-        # Contract: T_oo[P, q, i] = sum_j L[P, q, j_occ] * Y_scaled[i, j]
-        # shape: (naux, nmo, nocc)
-        if oo_dim > 0:
-            # L_occ: (naux, nmo, nocc), Y_scaled: (nocc, nocc)
-            L_occ = Lpq[:, :, :nocc]  # (naux, nmo, nocc)
-            # T_oo[P, q, i] = sum_j L_occ[P, q, j] * Y_scaled[i, j]
-            T_oo = np.einsum('Pqj,ij->Pqi', L_occ, Y_scaled, optimize=True)
-            # (naux, nmo, nocc)
+        # rho_m[p, q] += sum_{P, i} L_occ[P, p, i] * T_oo[P, q, i]
+        #              + pm * sum_{P, i} L_occ[P, q, i] * T_oo[P, p, i]
+        # term1 = L_occ_T @ T_oo.reshape(nmo, -1).T
+        scipy.linalg.blas.dgemm(
+            alpha=1.0,
+            a=T_oo.reshape(nmo, -1).T,
+            b=L_occ_T.T,
+            beta=0.0,
+            c=term1.T,
+            trans_a=True,
+            trans_b=False,
+            overwrite_c=True,
+        )
+        rho[m] += term1 + pm * term1.T
 
-            # rho contribution from occ-occ pairs:
-            # rho_m(p, q) += sum_{P, i} L_occ[P, p, i] * T_oo[P, q, i]
-            #              + pm * sum_{P, i} L_occ[P, q, i] * T_oo[P, p, i]
-            rho[m] += np.einsum('Ppi,Pqi->pq', L_occ, T_oo, optimize=True)
-            rho[m] += pm * np.einsum('Pqi,Ppi->pq', L_occ, T_oo, optimize=True)
+        # T_vv[P, q, a] = sum_b L_vir[P, q, b] * X_scaled[a, b]
+        # T_vv = (L_vir_T.reshape(-1, nvir) @ X_scaled.T).reshape(nmo, -1)
+        scipy.linalg.blas.dgemm(
+            alpha=1.0,
+            a=X_scaled.T,
+            b=L_vir_T.reshape(-1, nvir).T,
+            beta=0.0,
+            c=T_vv.reshape(-1, nvir).T,
+            trans_a=True,
+            trans_b=False,
+            overwrite_c=True,
+        )
 
-        if vv_dim > 0:
-            # L_vir: (naux, nmo, nvir), X_scaled: (nvir, nvir)
-            L_vir = Lpq[:, :, nocc:]  # (naux, nmo, nvir)
-            # T_vv[P, q, a] = sum_b L_vir[P, q, b] * X_scaled[a, b]
-            T_vv = np.einsum('Pqb,ab->Pqa', L_vir, X_scaled, optimize=True)
-
-            rho[m] += np.einsum('Ppa,Pqa->pq', L_vir, T_vv, optimize=True)
-            rho[m] += pm * np.einsum('Pqa,Ppa->pq', L_vir, T_vv, optimize=True)
+        # rho_m[p, q] += sum_{P, a} L_vir[P, p, a] * T_vv[P, q, a]
+        #              + pm * sum_{P, a} L_vir[P, q, a] * T_vv[P, p, a]
+        # term1 = L_vir_T @ T_vv.reshape(nmo, -1).T
+        scipy.linalg.blas.dgemm(
+            alpha=1.0,
+            a=T_vv.reshape(nmo, -1).T,
+            b=L_vir_T.T,
+            beta=0.0,
+            c=term1.T,
+            trans_a=True,
+            trans_b=False,
+            overwrite_c=True,
+        )
+        rho[m] += term1 + pm * term1.T
 
     return rho
 
@@ -200,40 +215,61 @@ def get_sigma(nocc, mo_energy, mo_energy_ref, exci, rho, oo_dim, mu,
     nmo = len(mo_energy)
     nroot = len(exci)
     eta2 = (3.0 * eta) ** 2
+    nvir = nmo - nocc
 
     if fullsigma is False:
         sigma_diag = np.zeros(nmo)
-        for m in range(nroot):
-            # Determine which q indices contribute
-            # For hh states (m < oo_dim): q must be virtual (q >= nocc)
-            # For pp states (m >= oo_dim): q must be occupied (q < nocc)
-            if m < oo_dim:
-                q_range = range(nocc, nmo)
-            else:
-                q_range = range(nocc)
+        # m < oo_dim: q in virtual space (q >= nocc)
+        exci_hh = exci[:oo_dim]
+        rho_hh = rho[:oo_dim, :, nocc:]  # (oo_dim, nmo, nvir)
+        ediff = mo_energy[:, None, None] + mo_energy_ref[None, None, nocc:] - 2.0 * mu - exci_hh[None, :, None]
+        contrib = (rho_hh.transpose(1, 0, 2) ** 2) * ediff / (ediff ** 2 + eta2)
+        sigma_diag += np.sum(contrib, axis=(1, 2))
 
-            for q in q_range:
-                ediff = mo_energy + mo_energy_ref[q] - 2.0 * mu - exci[m]
-                ediffsq = ediff ** 2
-                sigma_diag += rho[m, :, q] ** 2 * ediff / (ediffsq + eta2)
+        # m >= oo_dim: q in occupied space (q < nocc)
+        exci_pp = exci[oo_dim:]
+        rho_pp = rho[oo_dim:, :, :nocc]  # (vv_dim, nmo, nocc)
+        ediff = mo_energy[:, None, None] + mo_energy_ref[None, None, :nocc] - 2.0 * mu - exci_pp[None, :, None]
+        contrib = (rho_pp.transpose(1, 0, 2) ** 2) * ediff / (ediff ** 2 + eta2)
+        sigma_diag += np.sum(contrib, axis=(1, 2))
 
         sigma = np.diag(sigma_diag)
     else:
         sigma = np.zeros((nmo, nmo))
-        for m in range(nroot):
-            if m < oo_dim:
-                q_range = range(nocc, nmo)
-            else:
-                q_range = range(nocc)
+        E_avg = 0.5 * (mo_energy[:, None] + mo_energy[None, :])
+        chunk_size = 500
 
-            for q in q_range:
-                # Use average of p and p' energies for off-diagonal elements
-                ediff_p = mo_energy[:, None] + mo_energy_ref[q] - 2.0 * mu - exci[m]
-                ediff_pp = mo_energy[None, :] + mo_energy_ref[q] - 2.0 * mu - exci[m]
-                ediff = 0.5 * (ediff_p + ediff_pp)
-                ediffsq = ediff ** 2
-                rho_pq = rho[m, :, q]
-                sigma += np.outer(rho_pq, rho_pq) * ediff / (ediffsq + eta2)
+        # m < oo_dim: q >= nocc
+        exci_hh = exci[:oo_dim]
+        rho_hh = rho[:oo_dim, :, nocc:]  # (oo_dim, nmo, nvir)
+        for q_idx in range(nvir):
+            q = nocc + q_idx
+            rho_q = rho_hh[:, :, q_idx]  # (oo_dim, nmo)
+            for start in range(0, oo_dim, chunk_size):
+                end = min(start + chunk_size, oo_dim)
+                exci_chunk = exci_hh[start:end]
+                rho_chunk = rho_q[start:end]
+                ediff = E_avg[:, :, None] + mo_energy_ref[q] - 2.0 * mu - exci_chunk[None, None, :]
+                factor = ediff / (ediff ** 2 + eta2)
+                rho_t = rho_chunk.T
+                contrib = (rho_t[:, None, :] * rho_t[None, :, :]) * factor
+                sigma += np.sum(contrib, axis=2)
+
+        # m >= oo_dim: q < nocc
+        exci_pp = exci[oo_dim:]
+        rho_pp = rho[oo_dim:, :, :nocc]  # (vv_dim, nmo, nocc)
+        vv_dim = nroot - oo_dim
+        for q in range(nocc):
+            rho_q = rho_pp[:, :, q]  # (vv_dim, nmo)
+            for start in range(0, vv_dim, chunk_size):
+                end = min(start + chunk_size, vv_dim)
+                exci_chunk = exci_pp[start:end]
+                rho_chunk = rho_q[start:end]
+                ediff = E_avg[:, :, None] + mo_energy_ref[q] - 2.0 * mu - exci_chunk[None, None, :]
+                factor = ediff / (ediff ** 2 + eta2)
+                rho_t = rho_chunk.T
+                contrib = (rho_t[:, None, :] * rho_t[None, :, :]) * factor
+                sigma += np.sum(contrib, axis=2)
 
     return sigma
 
@@ -273,18 +309,26 @@ def get_sigma_derivative(nocc, mo_energy, mo_energy_ref, exci, rho, oo_dim, mu,
     nmo = len(mo_energy)
     nroot = len(exci)
     eta2 = (3.0 * eta) ** 2
+    nvir = nmo - nocc
     derivative = np.zeros(nmo)
 
-    for m in range(nroot):
-        if m < oo_dim:
-            q_range = range(nocc, nmo)
-        else:
-            q_range = range(nocc)
+    # m < oo_dim: q >= nocc
+    if oo_dim > 0:
+        exci_hh = exci[:oo_dim]
+        rho_hh = rho[:oo_dim, :, nocc:]
+        ediff = mo_energy[:, None, None] + mo_energy_ref[None, None, nocc:] - 2.0 * mu - exci_hh[None, :, None]
+        ediffsq = ediff ** 2
+        contrib = (rho_hh.transpose(1, 0, 2) ** 2) * (eta2 - ediffsq) / (ediffsq + eta2) ** 2
+        derivative += np.sum(contrib, axis=(1, 2))
 
-        for q in q_range:
-            ediff = mo_energy + mo_energy_ref[q] - 2.0 * mu - exci[m]
-            ediffsq = ediff ** 2
-            derivative += rho[m, :, q] ** 2 * (eta2 - ediffsq) / (ediffsq + eta2) ** 2
+    # m >= oo_dim: q < nocc
+    if nroot > oo_dim:
+        exci_pp = exci[oo_dim:]
+        rho_pp = rho[oo_dim:, :, :nocc]
+        ediff = mo_energy[:, None, None] + mo_energy_ref[None, None, :nocc] - 2.0 * mu - exci_pp[None, :, None]
+        ediffsq = ediff ** 2
+        contrib = (rho_pp.transpose(1, 0, 2) ** 2) * (eta2 - ediffsq) / (ediffsq + eta2) ** 2
+        derivative += np.sum(contrib, axis=(1, 2))
 
     return derivative
 
@@ -326,33 +370,53 @@ def get_sigma_dynamic(nocc, mo_energy_ref, exci, rho, oo_dim, mu, omega,
     nroot = len(exci)
     nw = len(omega)
 
-    if fullsigma:
-        sigma = np.zeros((nmo, nmo, nw), dtype=np.complex128)
-    else:
-        sigma = np.zeros((nmo, nmo, nw), dtype=np.complex128)
+    sigma = np.zeros((nmo, nmo, nw), dtype=np.complex128)
+    chunk_size = 500
 
-    for m in range(nroot):
-        if m < oo_dim:
-            q_range = range(nocc, nmo)
-        else:
-            q_range = range(nocc)
+    # m < oo_dim: q >= nocc
+    if oo_dim > 0:
+        exci_hh = exci[:oo_dim]
+        rho_hh = rho[:oo_dim, :, nocc:]
+        nvir = nmo - nocc
+        for q_idx in range(nvir):
+            q = nocc + q_idx
+            rho_q = rho_hh[:, :, q_idx]
+            for start in range(0, oo_dim, chunk_size):
+                end = min(start + chunk_size, oo_dim)
+                exci_chunk = exci_hh[start:end]
+                rho_chunk = rho_q[start:end]
+                pole = omega[None, :] + mo_energy_ref[q] - 2.0 * mu - exci_chunk[:, None] - 3.0j * eta
+                if fullsigma:
+                    B = rho_chunk[:, :, None] / pole[:, None, :]
+                    B_batch = B.transpose(2, 0, 1)
+                    A_batch = rho_chunk.T[None, :, :]
+                    C_batch = np.matmul(A_batch, B_batch)
+                    sigma += C_batch.transpose(1, 2, 0)
+                else:
+                    C = (rho_chunk ** 2).T @ (1.0 / pole)
+                    sigma[np.arange(nmo), np.arange(nmo), :] += C
 
-        for q in q_range:
-            # pole: omega + e_q - 2*mu - Omega_m
-            pole = omega[:] + mo_energy_ref[q] - 2.0 * mu - exci[m] - 3.0j * eta
-            rho_pq = rho[m, :, q]  # (nmo,)
-
-            if fullsigma:
-                # sigma[p, p', iw] += rho[m,p,q] * rho[m,p',q] / pole[iw]
-                rho_outer = np.outer(rho_pq, rho_pq)  # (nmo, nmo)
-                sigma += rho_outer[:, :, None] / pole[None, None, :]
-            else:
-                # diagonal only
-                rho_sq = rho_pq ** 2
-                sigma[np.arange(nmo), np.arange(nmo), :] += \
-                    rho_sq[:, None] / pole[None, :]
-
-    return sigma
+    # m >= oo_dim: q < nocc
+    if nroot > oo_dim:
+        exci_pp = exci[oo_dim:]
+        rho_pp = rho[oo_dim:, :, :nocc]
+        vv_dim = nroot - oo_dim
+        for q in range(nocc):
+            rho_q = rho_pp[:, :, q]
+            for start in range(0, vv_dim, chunk_size):
+                end = min(start + chunk_size, vv_dim)
+                exci_chunk = exci_pp[start:end]
+                rho_chunk = rho_q[start:end]
+                pole = omega[None, :] + mo_energy_ref[q] - 2.0 * mu - exci_chunk[:, None] - 3.0j * eta
+                if fullsigma:
+                    B = rho_chunk[:, :, None] / pole[:, None, :]
+                    B_batch = B.transpose(2, 0, 1)
+                    A_batch = rho_chunk.T[None, :, :]
+                    C_batch = np.matmul(A_batch, B_batch)
+                    sigma += C_batch.transpose(1, 2, 0)
+                else:
+                    C = (rho_chunk ** 2).T @ (1.0 / pole)
+                    sigma[np.arange(nmo), np.arange(nmo), :] += C
 
 
 def kernel(tm):
@@ -380,14 +444,11 @@ def kernel(tm):
     tm.mu = mu
 
     # Mean-field exchange-correlation matrix
-    tm.vxc = reduce(np.matmul,
-                    (mo_coeff.T, mf.get_veff() - mf.get_j(), mo_coeff))
+    tm.vxc = mo_coeff.T @ (mf.get_veff() - mf.get_j()) @ mo_coeff
 
     # Exchange self-energy from density fitting
     if tm.vhf_df:
-        vk = -np.einsum('Lpi,Liq->pq',
-                        tm.Lpq[:, :, :nocc], tm.Lpq[:, :nocc, :],
-                        optimize=True)
+        vk = -np.einsum('Lpi,Liq->pq', tm.Lpq[:, :, :nocc], tm.Lpq[:, :nocc, :], optimize=True)
     else:
         dm = mf.make_rdm1()
         if (not isinstance(mf, dft.rks.RKS)) and isinstance(mf, scf.hf.RHF):
@@ -395,16 +456,26 @@ def kernel(tm):
         else:
             rhf = scf.RHF(tm.mol)
         vk = rhf.get_veff(dm=dm) - rhf.get_j(dm=dm)
-        vk = reduce(np.matmul, (mo_coeff.T, vk, mo_coeff))
+        vk = mo_coeff.T @ vk @ mo_coeff
     tm.vk = vk
 
     # Diagonalize ppRPA for singlet and triplet channels
     print("begin ppRPA diagonalization: singlet.", flush=True)
-    exci_s, xy_s, ec_s = diagonalize_pprpa_singlet(
-        nocc=nocc, mo_energy=mf_mo_energy, Lpq=tm.Lpq, mu=mu)
+    t0_cpu = time.process_time()
+    t0_wall = time.time()
+    exci_s, xy_s, _ = diagonalize_pprpa_singlet(nocc=nocc, mo_energy=mf_mo_energy, Lpq=tm.Lpq, mu=mu)
+    t1_cpu = time.process_time()
+    t1_wall = time.time()
+    print(f"ppRPA diagonalization: singlet. CPU time: {t1_cpu - t0_cpu:.2f} s, Wall time: {t1_wall - t0_wall:.2f} s", flush=True)
+
     print("begin ppRPA diagonalization: triplet.", flush=True)
-    exci_t, xy_t, ec_t = diagonalize_pprpa_triplet(
-        nocc=nocc, mo_energy=mf_mo_energy, Lpq=tm.Lpq, mu=mu)
+    t0_cpu = time.process_time()
+    t0_wall = time.time()
+    exci_t, xy_t, _ = diagonalize_pprpa_triplet(nocc=nocc, mo_energy=mf_mo_energy, Lpq=tm.Lpq, mu=mu)
+    t1_cpu = time.process_time()
+    t1_wall = time.time()
+    print(f"ppRPA diagonalization: triplet. CPU time: {t1_cpu - t0_cpu:.2f} s, Wall time: {t1_wall - t0_wall:.2f} s", flush=True)
+
     tm.exci_s = exci_s
     tm.exci_t = exci_t
     tm.xy_s = xy_s
@@ -415,24 +486,48 @@ def kernel(tm):
 
     # Compute transition densities
     print("begin T-matrix transition density: singlet.", flush=True)
-    rho_s = get_transition_density(
-        multi='s', nocc=nocc, nvir=nvir, xy=xy_s, Lpq=tm.Lpq)
+    t0_cpu = time.process_time()
+    t0_wall = time.time()
+    rho_s = get_transition_density(multi='s', nocc=nocc, nvir=nvir, xy=xy_s, Lpq=tm.Lpq)
+    t1_cpu = time.process_time()
+    t1_wall = time.time()
+    print(f"T-matrix transition density: singlet. CPU time: {t1_cpu - t0_cpu:.2f} s, Wall time: {t1_wall - t0_wall:.2f} s", flush=True)
+
     print("begin T-matrix transition density: triplet.", flush=True)
-    rho_t = get_transition_density(
-        multi='t', nocc=nocc, nvir=nvir, xy=xy_t, Lpq=tm.Lpq)
+    t0_cpu = time.process_time()
+    t0_wall = time.time()
+    rho_t = get_transition_density(multi='t', nocc=nocc, nvir=nvir, xy=xy_t, Lpq=tm.Lpq)
+    t1_cpu = time.process_time()
+    t1_wall = time.time()
+    print(f"T-matrix transition density: triplet. CPU time: {t1_cpu - t0_cpu:.2f} s, Wall time: {t1_wall - t0_wall:.2f} s", flush=True)
+
     tm.rho_s = rho_s
     tm.rho_t = rho_t
 
     # Compute self-energy
     # For restricted T-matrix: Sigma_c = Sigma_s + 3 * Sigma_t
+    print("begin T-matrix self-energy: singlet.", flush=True)
+    t0_cpu = time.process_time()
+    t0_wall = time.time()
     sigma_s = get_sigma(
         nocc=nocc, mo_energy=mo_energy, mo_energy_ref=mf_mo_energy,
         exci=exci_s, rho=rho_s, oo_dim=oo_dim_s, mu=mu, eta=tm.eta,
         fullsigma=False)
+    t1_cpu = time.process_time()
+    t1_wall = time.time()
+    print(f"T-matrix self-energy: singlet. CPU time: {t1_cpu - t0_cpu:.2f} s, Wall time: {t1_wall - t0_wall:.2f} s", flush=True)
+
+    print("begin T-matrix self-energy: triplet.", flush=True)
+    t0_cpu = time.process_time()
+    t0_wall = time.time()
     sigma_t = get_sigma(
         nocc=nocc, mo_energy=mo_energy, mo_energy_ref=mf_mo_energy,
         exci=exci_t, rho=rho_t, oo_dim=oo_dim_t, mu=mu, eta=tm.eta,
         fullsigma=False)
+    t1_cpu = time.process_time()
+    t1_wall = time.time()
+    print(f"T-matrix self-energy: triplet. CPU time: {t1_cpu - t0_cpu:.2f} s, Wall time: {t1_wall - t0_wall:.2f} s", flush=True)
+
     sigma = sigma_s + 3.0 * sigma_t
 
     # Quasiparticle equation
@@ -784,22 +879,44 @@ class TMatrix(lib.StreamObject):
             ('t', self.exci_t, self.rho_t, oo_dim_t, 3.0),
         ]:
             nroot = len(exci)
-            for m in range(nroot):
-                if m < oo_dim:
-                    q_range = range(nocc, nmo)
-                else:
-                    q_range = range(nocc)
+            chunk_size = 500
 
-                for q in q_range:
-                    rho_sq = rho[m, :, q] ** 2
-                    ediff = omega[None, :] + mo_energy[q] - 2.0 * self.mu - exci[m]
-                    contrib_real = ediff / (ediff ** 2 + eta2)
-                    contrib_imag = eta / (ediff ** 2 + eta2)
-                    # Sign convention: virtual q contributes with opposite sign
-                    if q >= nocc:
-                        contrib_imag *= -1.0
-                    sigma_real += factor * rho_sq[:, None] * contrib_real
-                    sigma_imag += factor * rho_sq[:, None] * contrib_imag
+            # m < oo_dim: q >= nocc
+            if oo_dim > 0:
+                exci_hh = exci[:oo_dim]
+                rho_hh = rho[:oo_dim, :, nocc:]  # (oo_dim, nmo, nvir)
+                nvir = nmo - nocc
+                for q_idx in range(nvir):
+                    q = nocc + q_idx
+                    rho_q = rho_hh[:, :, q_idx]  # (oo_dim, nmo)
+                    for start in range(0, oo_dim, chunk_size):
+                        end = min(start + chunk_size, oo_dim)
+                        exci_chunk = exci_hh[start:end]
+                        rho_chunk = rho_q[start:end]
+                        ediff = omega[None, :] + mo_energy[q] - 2.0 * self.mu - exci_chunk[:, None]
+                        denom = ediff ** 2 + eta2
+                        contrib_real = ediff / denom
+                        contrib_imag = -eta / denom
+                        sigma_real += factor * ((rho_chunk ** 2).T @ contrib_real)
+                        sigma_imag += factor * ((rho_chunk ** 2).T @ contrib_imag)
+
+            # m >= oo_dim: q < nocc
+            if nroot > oo_dim:
+                exci_pp = exci[oo_dim:]
+                rho_pp = rho[oo_dim:, :, :nocc]  # (vv_dim, nmo, nocc)
+                vv_dim = nroot - oo_dim
+                for q in range(nocc):
+                    rho_q = rho_pp[:, :, q]  # (vv_dim, nmo)
+                    for start in range(0, vv_dim, chunk_size):
+                        end = min(start + chunk_size, vv_dim)
+                        exci_chunk = exci_pp[start:end]
+                        rho_chunk = rho_q[start:end]
+                        ediff = omega[None, :] + mo_energy[q] - 2.0 * self.mu - exci_chunk[:, None]
+                        denom = ediff ** 2 + eta2
+                        contrib_real = ediff / denom
+                        contrib_imag = eta / denom
+                        sigma_real += factor * ((rho_chunk ** 2).T @ contrib_real)
+                        sigma_imag += factor * ((rho_chunk ** 2).T @ contrib_imag)
 
         vk_minus_vxc = (self.vk - self.vxc).diagonal()
         ereal = (omega[None, :] - mo_energy[:, None]
