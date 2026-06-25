@@ -1474,11 +1474,12 @@ def get_veff_krks(ks_grad, dm=None, kpts=None, ao_cache=None):
     else:
         vxc = get_vxc(ni, cell, grids, mf.xc, dm, kpts,
                            max_memory=max_memory, verbose=ks_grad.verbose,
-                           ao_cache=ao_cache)
+                           **({} if ao_cache is None else {'ao_cache': ao_cache}))
 
     t0 = logger.timer(ks_grad, 'vxc', *t0)
     if not ni.libxc.is_hybrid_xc(mf.xc):
-        vjk = ks_grad.get_j(dm, kpts, ao_cache=ao_cache)
+        vjk = ks_grad.get_j(dm, kpts,
+                            **({} if ao_cache is None else {'ao_cache': ao_cache}))
     else:
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc, spin=cell.spin)
         vj, vk = ks_grad.get_jk(dm, kpts)
@@ -1530,7 +1531,9 @@ def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000, ao_cache=None):
     else:
         raise NotImplementedError(f'td-rks for functional {xc_code}')
 
-    for aok0, aok1, mask, weight, coords in ni.block_loop(mol, grids, nao, ao_deriv, max_memory=max_memory, ao_cache=ao_cache):
+    for aok0, aok1, mask, weight, coords in ni.block_loop(
+            mol, grids, nao, ao_deriv, max_memory=max_memory,
+            **({} if ao_cache is None else {'ao_cache': ao_cache})):
         aok0 = aok0[0]
         if xctype == 'LDA':
             ao0 = aok0[0]

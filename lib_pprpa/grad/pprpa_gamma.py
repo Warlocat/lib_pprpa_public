@@ -35,12 +35,19 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     # Reuse one grid AO evaluation across all CPHF iterations: build an AO
     # cache for the reference and hand it to the stock response function.
     if hasattr(mf, "xc"):
-        from pyscf.pbc.dft.numint import AOCache
         ni_resp = mf._numint
         deriv_resp = 1 if ni_resp._xc_type(mf.xc) in ("GGA", "MGGA") else 0
-        resp_cache = AOCache(ni_resp, cell, mf.grids, deriv_resp,
-                             kpts=None, max_memory=mf.max_memory)
-        vresp = mf.gen_response(singlet=None, hermi=1, ao_cache=resp_cache)
+        if hasattr(ni_resp, 'set_ao_cache'):
+            # pyscf-warlocat: cache on the numint object
+            ni_resp.set_ao_cache(cell, mf.grids, deriv_resp,
+                                 kpts=None, max_memory=mf.max_memory)
+            vresp = mf.gen_response(singlet=None, hermi=1)
+        else:
+            # legacy pyscf: standalone AOCache, passed as kwarg
+            from pyscf.pbc.dft.numint import AOCache
+            resp_cache = AOCache(ni_resp, cell, mf.grids, deriv_resp,
+                                 kpts=None, max_memory=mf.max_memory)
+            vresp = mf.gen_response(singlet=None, hermi=1, ao_cache=resp_cache)
     else:
         vresp = None
     dm0, i_int = make_rdm1_relaxed_rhf_pprpa(
@@ -86,19 +93,30 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
             de[k] += np.einsum('xij,ji->x', s1[:, p0:p1], i_int[:, p0:p1]) * 2
     else:  # KS
         # Precompute the uniform-grid AOs once and reuse them across the Vxc,
-        # Coulomb, and fxc-kernel derivative passes (pbc.dft.numint.AOCache).
-        from pyscf.pbc.dft.numint import AOCache
+        # Coulomb, and fxc-kernel derivative passes. On pyscf-warlocat the cache
+        # lives on the numint object; on legacy pyscf it is a standalone AOCache
+        # passed as a kwarg to every downstream function.
         ni = kmf._numint
         ao_deriv = 2 if ni._xc_type(kmf.xc) in ('GGA', 'MGGA') else 1
-        ao_cache = AOCache(ni, cell, kmf.grids, ao_deriv, kpts=kmf.kpts,
-                           max_memory=kmf_grad.max_memory)
-        vk = kmf_grad.get_k(np.array([xy_ao])) # (3,nband,nao,nao)
-        vk = vk[:,0,:,:]
-        vxc, vjk = get_veff_krks(kmf_grad, np.array([[dm0_hf], [dm0]]), ao_cache=ao_cache)
-        vxc = vxc[:,:,0,:,:].transpose(1,0,2,3)
-        vjk = vjk[:,:,0,:,:].transpose(1,0,2,3)
-        
-        vjk[1] += _contract_xc_kernel_krks(kmf, kmf.xc, dm0, ao_cache=ao_cache)[0][1:]*0.5
+        if hasattr(ni, 'set_ao_cache'):
+            ni.set_ao_cache(cell, kmf.grids, ao_deriv, kpts=kmf.kpts,
+                            max_memory=kmf_grad.max_memory)
+            vk = kmf_grad.get_k(np.array([xy_ao]))
+            vk = vk[:,0,:,:]
+            vxc, vjk = get_veff_krks(kmf_grad, np.array([[dm0_hf], [dm0]]))
+            vxc = vxc[:,:,0,:,:].transpose(1,0,2,3)
+            vjk = vjk[:,:,0,:,:].transpose(1,0,2,3)
+            vjk[1] += _contract_xc_kernel_krks(kmf, kmf.xc, dm0)[0][1:]*0.5
+        else:
+            from pyscf.pbc.dft.numint import AOCache
+            ao_cache = AOCache(ni, cell, kmf.grids, ao_deriv, kpts=kmf.kpts,
+                               max_memory=kmf_grad.max_memory)
+            vk = kmf_grad.get_k(np.array([xy_ao]))
+            vk = vk[:,0,:,:]
+            vxc, vjk = get_veff_krks(kmf_grad, np.array([[dm0_hf], [dm0]]), ao_cache=ao_cache)
+            vxc = vxc[:,:,0,:,:].transpose(1,0,2,3)
+            vjk = vjk[:,:,0,:,:].transpose(1,0,2,3)
+            vjk[1] += _contract_xc_kernel_krks(kmf, kmf.xc, dm0, ao_cache=ao_cache)[0][1:]*0.5
 
         aoslices = cell.aoslice_by_atom()
         de = np.zeros((len(atmlst), 3))
