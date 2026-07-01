@@ -186,7 +186,7 @@ def make_rdm1_relaxed_ghf_pprpa(pprpa, mf, xy=None, istate=0, cphf_max_cycle=20,
     nvir = pprpa.nvir
     nfrozen_occ = nocc_all - nocc
     nfrozen_vir = nvir_all - nvir
-    if nfrozen_occ > 0 or nfrozen_vir > 0:
+    if nfrozen_occ > 0 or nfrozen_vir > 0 or pprpa.Lpq is None:
         _, mo_ene_full, Lpq_full = pyscf_util.get_pyscf_input_mol_g(mf)
     else:
         mo_ene_full = pprpa.mo_energy

@@ -228,7 +228,7 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
         X_eri = mf.mo_coeff.T @ X_eri @ orbp
         Y_eri = mf.mo_coeff.T @ Y_eri @ orbp
     else:
-        if nfrozen_occ > 0 or nfrozen_vir > 0:
+        if nfrozen_occ > 0 or nfrozen_vir > 0 or pprpa.Lpq is None:
             _, mo_ene_full, Lpq_full = pyscf_util.get_pyscf_input_mol(mf)
         else:
             mo_ene_full = pprpa.mo_energy

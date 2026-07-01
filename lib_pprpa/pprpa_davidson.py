@@ -1161,16 +1161,17 @@ class ppRPA_Davidson():
         self.multi = multi
         self.check_parameter()
 
-        if self.Loo is None or self.Lvv is None:
-            self.Loo = np.ascontiguousarray(self.Lpq[:, :self.nocc, :self.nocc])
-            self.Lvv = np.ascontiguousarray(self.Lpq[:, self.nocc:, self.nocc:])
-            self.Lov = np.ascontiguousarray(self.Lpq[:, :self.nocc, self.nocc:])
-            self.Lvo = np.ascontiguousarray(self.Lpq[:, self.nocc:, :self.nocc])
-            self.oLo = np.ascontiguousarray(self.Loo.transpose(1, 0, 2))
-            self.vLo = np.ascontiguousarray(self.Lvo.transpose(1, 0, 2))
-            self.oLv = np.ascontiguousarray(self.Lov.transpose(1, 0, 2))
-            self.vLv = np.ascontiguousarray(self.Lvv.transpose(1, 0, 2))
-            self.Lpq = None
+        if not self._ao_direct and not self._use_eri:
+            if self.Loo is None or self.Lvv is None:
+                self.Loo = np.ascontiguousarray(self.Lpq[:, :self.nocc, :self.nocc])
+                self.Lvv = np.ascontiguousarray(self.Lpq[:, self.nocc:, self.nocc:])
+                self.Lov = np.ascontiguousarray(self.Lpq[:, :self.nocc, self.nocc:])
+                self.Lvo = np.ascontiguousarray(self.Lpq[:, self.nocc:, :self.nocc])
+                self.oLo = np.ascontiguousarray(self.Loo.transpose(1, 0, 2))
+                self.vLo = np.ascontiguousarray(self.Lvo.transpose(1, 0, 2))
+                self.oLv = np.ascontiguousarray(self.Lov.transpose(1, 0, 2))
+                self.vLv = np.ascontiguousarray(self.Lvv.transpose(1, 0, 2))
+                self.Lpq = None
 
         self.dump_flags()
         self.check_memory()
