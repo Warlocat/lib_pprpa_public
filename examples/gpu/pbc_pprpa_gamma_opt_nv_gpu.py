@@ -180,7 +180,7 @@ if __name__ == "__main__":
           f"AS={AS} ###", flush=True)
     converged, cell_opt = ase_utils.kernel(
         cell, grad_func=grad_func, ene_func=ene_func,
-        logfile="opt_ase.log", fmax=FMAX, max_steps=1) #MAXSTEPS)
+        logfile="opt_ase.log", fmax=FMAX, max_steps=MAXSTEPS)
     opt_ase = pyscf_to_ase_atoms(cell_opt)
     info={"converged":converged, "charge":CHARGE, "mult":MULT, "channel":CHANNEL, "istate":ISTATE, "ke_Ha":KE, "xc":XC, "nao":cell.nao}
     opt_ase.info.update(info)
