@@ -24,10 +24,12 @@ import sys
 import numpy as np
 import cupy as cp
 from pyscf.pbc import gto, dft as cdft
+from pyscf.pbc.tools.pyscf_ase import pyscf_to_ase_atoms
 from gpu4pyscf.pbc import dft as gdft
 from gpu4pyscf.pbc.df.fft import FFTDF
 from gpu4pyscf.pbc.df import fft_jk
 
+from ase.io.extxyz import write_extxyz
 from lib_pprpa.grad.ase_utils import pprpaobj, kernel as ase_opt
 from lib_pprpa.pprpa_davidson_gpu import attach_gpu_contraction
 from lib_pprpa.grad import pprpa_gamma          # noqa: F401  (attaches .Gradients)
@@ -142,11 +144,10 @@ if __name__ == "__main__":
           flush=True)
     converged, cell_opt = ase_opt(cell, grad_func=grad_func, ene_func=ene_func,
                                   logfile="-", fmax=FMAX, max_steps=MAXSTEPS)
-    coords = cell_opt.atom_coords() * 0.52917721092   # Bohr -> Angstrom
-    print(f"\nconverged = {converged}")
-    for i in range(cell_opt.natm):
-        print(f"  {cell_opt.atom_symbol(i):2s} {coords[i][0]:12.6f} "
-              f"{coords[i][1]:12.6f} {coords[i][2]:12.6f}")
+    opt_ase = pyscf_to_ase_atoms(cell_opt)
+    info={"converged":converged, "charge":CHARGE, "mult":MULT, "channel":CHANNEL, "istate":ISTATE, "xc":XC, "nao":cell.nao}
+    opt_ase.info.update(info)
+    write_extxyz("optimized.xyz", opt_ase)
 
 # ---------------------------------------------------------------------------
 # Scaling to large cells / defects (e.g. NV center in diamond):

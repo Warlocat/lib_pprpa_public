@@ -33,8 +33,10 @@ import sys, os
 import numpy as np
 import cupy as cp
 from ase.io import read
+from ase.io.extxyz import write_extxyz
 from pyscf.data.nist import BOHR
 from pyscf.pbc import gto, dft as cdft
+from pyscf.pbc.tools.pyscf_ase import pyscf_to_ase_atoms
 from gpu4pyscf.pbc import dft as gdft
 from gpu4pyscf.pbc.df.fft import FFTDF
 from gpu4pyscf.pbc.df import fft_jk
@@ -179,10 +181,8 @@ if __name__ == "__main__":
     converged, cell_opt = ase_utils.kernel(
         cell, grad_func=grad_func, ene_func=ene_func,
         logfile="opt_ase.log", fmax=FMAX, max_steps=MAXSTEPS)
-    coords = cell_opt.atom_coords() * BOHR
-    with open("opt_final.xyz", "w") as f:
-        f.write(f"{cell_opt.natm}\nNV pp-RPA opt mult={MULT} ke={KE} converged={converged}\n")
-        for i in range(cell_opt.natm):
-            c = coords[i]
-            f.write(f"{cell_opt.atom_symbol(i)} {c[0]:.9f} {c[1]:.9f} {c[2]:.9f}\n")
+    opt_ase = pyscf_to_ase_atoms(cell_opt)
+    info={"converged":converged, "charge":CHARGE, "mult":MULT, "channel":CHANNEL, "istate":ISTATE, "ke_Ha":KE, "xc":XC, "nao":cell.nao}
+    opt_ase.info.update(info)
+    write_extxyz("opt_final.xyz", opt_ase)
     print(f"\nconverged = {converged}   (final geometry -> opt_final.xyz)", flush=True)
