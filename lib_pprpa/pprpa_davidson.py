@@ -336,10 +336,10 @@ def _pprpa_contraction(pprpa, tri_vec):
     z_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
     z_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
 
-    oLo_z = np.zeros(shape=[nocc * naux, nocc], dtype=np.double)
-    oLv_z = np.zeros(shape=[nocc * naux, nvir], dtype=np.double)
-    vLo_z = np.zeros(shape=[nvir * naux, nocc], dtype=np.double)
-    vLv_z = np.zeros(shape=[nvir * naux, nvir], dtype=np.double)
+    oLo_z = np.zeros(shape=[nocc * (naux or 0), nocc], dtype=np.double)
+    oLv_z = np.zeros(shape=[nocc * (naux or 0), nvir], dtype=np.double)
+    vLo_z = np.zeros(shape=[nvir * (naux or 0), nocc], dtype=np.double)
+    vLv_z = np.zeros(shape=[nvir * (naux or 0), nvir], dtype=np.double)
 
     prod_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
     prod_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
