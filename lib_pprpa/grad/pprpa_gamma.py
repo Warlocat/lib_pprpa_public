@@ -43,11 +43,8 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
                                  kpts=None, max_memory=mf.max_memory)
             vresp = mf.gen_response(singlet=None, hermi=1)
         else:
-            # legacy pyscf: standalone AOCache, passed as kwarg
-            from pyscf.pbc.dft.numint import AOCache
-            resp_cache = AOCache(ni_resp, cell, mf.grids, deriv_resp,
-                                 kpts=None, max_memory=mf.max_memory)
-            vresp = mf.gen_response(singlet=None, hermi=1, ao_cache=resp_cache)
+            # FIX(audit): stock pyscf has no ao_cache support; plain response (no caching)
+            vresp = mf.gen_response(singlet=None, hermi=1)
     else:
         vresp = None
     dm0, i_int = make_rdm1_relaxed_rhf_pprpa(
@@ -108,15 +105,13 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
             vjk = vjk[:,:,0,:,:].transpose(1,0,2,3)
             vjk[1] += _contract_xc_kernel_krks(kmf, kmf.xc, dm0)[0][1:]*0.5
         else:
-            from pyscf.pbc.dft.numint import AOCache
-            ao_cache = AOCache(ni, cell, kmf.grids, ao_deriv, kpts=kmf.kpts,
-                               max_memory=kmf_grad.max_memory)
+            # FIX(audit): stock pyscf has no ao_cache support; plain calls (no caching)
             vk = kmf_grad.get_k(np.array([xy_ao]))
             vk = vk[:,0,:,:]
-            vxc, vjk = get_veff_krks(kmf_grad, np.array([[dm0_hf], [dm0]]), ao_cache=ao_cache)
+            vxc, vjk = get_veff_krks(kmf_grad, np.array([[dm0_hf], [dm0]]))
             vxc = vxc[:,:,0,:,:].transpose(1,0,2,3)
             vjk = vjk[:,:,0,:,:].transpose(1,0,2,3)
-            vjk[1] += _contract_xc_kernel_krks(kmf, kmf.xc, dm0, ao_cache=ao_cache)[0][1:]*0.5
+            vjk[1] += _contract_xc_kernel_krks(kmf, kmf.xc, dm0)[0][1:]*0.5
 
         aoslices = cell.aoslice_by_atom()
         de = np.zeros((len(atmlst), 3))
