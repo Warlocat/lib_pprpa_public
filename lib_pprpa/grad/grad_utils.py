@@ -4,6 +4,7 @@ Author: Chaoqun Zhang <cq_zhang@outlook.com>
 
 import numpy as np
 import scipy
+from pyscf import lib
 from functools import reduce
 from lib_pprpa.pprpa_util import start_clock, stop_clock, GMRES_Pople, GMRES_wrapper
 
@@ -48,14 +49,14 @@ def get_xy_full(xy, oo_dim, mult='t'):
 def make_rdm1_unrelaxed_from_xy_full(occ_y_mat, vir_x_mat, diag=True):
     """Make unrelaxed one-particle density matrix from the full X and Y matrices."""
     if diag:
-        di = -np.einsum('ij,ij->i', occ_y_mat.conj(), occ_y_mat)
-        da = np.einsum('ab,ab->a', vir_x_mat.conj(), vir_x_mat)
+        di = -lib.einsum('ij,ij->i', occ_y_mat.conj(), occ_y_mat)
+        da = lib.einsum('ab,ab->a', vir_x_mat.conj(), vir_x_mat)
         # combine the two parts
         den = np.concatenate((di, da))
     else:
         print('Warning: non-diagonal 1e-RDM is not well-defined for pp-RPA with both DEA and DIP blocks.')
-        den_v = np.einsum('ac,bc->ba', vir_x_mat.conj(), vir_x_mat)
-        den_o = -np.einsum('ik,jk->ij', occ_y_mat.conj(), occ_y_mat)
+        den_v = lib.einsum('ac,bc->ba', vir_x_mat.conj(), vir_x_mat)
+        den_o = -lib.einsum('ik,jk->ij', occ_y_mat.conj(), occ_y_mat)
         den = np.zeros((den_v.shape[0] + den_o.shape[0], den_v.shape[1] + den_o.shape[1]), dtype=den_v.dtype)
         den[: den_o.shape[0], : den_o.shape[1]] = den_o
         den[den_o.shape[0] :, den_o.shape[1] :] = den_v
@@ -77,16 +78,16 @@ def make_tdm1(xy1, xy2, oo_dim, mult='t'):
     vv_dim = len(xy1) - oo_dim
 
     if oo_dim == 0:
-        tdm = np.einsum('ac,bc->ab', vir_x_mat1.conj(), vir_x_mat2).T
-        diagonal_correction = np.einsum('ab,ab->', vir_x_mat1.conj(), vir_x_mat2)
+        tdm = lib.einsum('ac,bc->ab', vir_x_mat1.conj(), vir_x_mat2).T
+        diagonal_correction = lib.einsum('ab,ab->', vir_x_mat1.conj(), vir_x_mat2)
     elif vv_dim == 0:
-        tdm = -np.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
-        diagonal_correction = np.einsum('ij,ij->', occ_y_mat1.conj(), occ_y_mat2)
+        tdm = -lib.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
+        diagonal_correction = lib.einsum('ij,ij->', occ_y_mat1.conj(), occ_y_mat2)
     else:
         print('Warning: TDM is not well-defined for pp-RPA with both DEA and DIP blocks.')
-        tdm_v = np.einsum('ac,bc->ab', vir_x_mat1.conj(), vir_x_mat2).T
-        tdm_o = -np.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
-        diagonal_correction = np.einsum('ab,ab->', vir_x_mat1.conj(), vir_x_mat2) + np.einsum(
+        tdm_v = lib.einsum('ac,bc->ab', vir_x_mat1.conj(), vir_x_mat2).T
+        tdm_o = -lib.einsum('ik,jk->ij', occ_y_mat1.conj(), occ_y_mat2)
+        diagonal_correction = lib.einsum('ab,ab->', vir_x_mat1.conj(), vir_x_mat2) + lib.einsum(
             'ij,ij->', occ_y_mat1.conj(), occ_y_mat2
         )
         tdm = np.zeros((tdm_v.shape[0] + tdm_o.shape[0], tdm_v.shape[1] + tdm_o.shape[1]), dtype=tdm_v.dtype)
@@ -354,10 +355,10 @@ def make_rdm2_from_xy_full(occ_y_mat, vir_x_mat):
     \Gamma_{ab,ij} = X_{ab}^* Y_{ij}
     \Gamma_{ij,kl} = Y_{ij}^* Y_{kl}
     """
-    dijkl = np.einsum('ij,kl->ijkl', occ_y_mat.conj(), occ_y_mat)
-    dijab = np.einsum('ij,ab->ijab', occ_y_mat.conj(), vir_x_mat)
-    dabij = np.einsum('ab,ij->abij', vir_x_mat.conj(), occ_y_mat)
-    dabcd = np.einsum('ab,cd->abcd', vir_x_mat.conj(), vir_x_mat)
+    dijkl = lib.einsum('ij,kl->ijkl', occ_y_mat.conj(), occ_y_mat)
+    dijab = lib.einsum('ij,ab->ijab', occ_y_mat.conj(), vir_x_mat)
+    dabij = lib.einsum('ab,ij->abij', vir_x_mat.conj(), occ_y_mat)
+    dabcd = lib.einsum('ab,cd->abcd', vir_x_mat.conj(), vir_x_mat)
     o_size = len(occ_y_mat)
     v_size = len(vir_x_mat)
     size = o_size + v_size
@@ -460,10 +461,10 @@ def contraction_1rdm_Lpq_diag(
     den_slice = choose_slice(den_label, nfrozen_occ, nocc, nvir, nfrozen_vir)
     slice1 = choose_slice(label1, nfrozen_occ, nocc, nvir, nfrozen_vir)
     slice2 = choose_slice(label2, nfrozen_occ, nocc, nvir, nfrozen_vir)
-    out = np.einsum('r,Prr,Pts->ts', den, Lpq_full[:, den_slice, den_slice], Lpq_full[:, slice1, slice2], optimize=True)
+    out = lib.einsum('r,Prr,Pts->ts', den, Lpq_full[:, den_slice, den_slice], Lpq_full[:, slice1, slice2], optimize=True)
     if rhf:
         out *= 2.0
-    out -= np.einsum(
+    out -= lib.einsum(
         'r,Prs,Ptr->ts', den, Lpq_full[:, den_slice, slice2], Lpq_full[:, slice1, den_slice], optimize=True
     )
     return out
@@ -495,12 +496,12 @@ def contraction_1rdm_Lpq(
     den_slice2 = choose_slice(den_label2, nfrozen_occ, nocc, nvir, nfrozen_vir)
     slice1 = choose_slice(label1, nfrozen_occ, nocc, nvir, nfrozen_vir)
     slice2 = choose_slice(label2, nfrozen_occ, nocc, nvir, nfrozen_vir)
-    out = np.einsum(
+    out = lib.einsum(
         'pq,Pqp,Pts->ts', den, Lpq_full[:, den_slice2, den_slice1], Lpq_full[:, slice1, slice2], optimize=True
     )
     if rhf:
         out *= 2.0
-    out -= np.einsum(
+    out -= lib.einsum(
         'pq,Pqs,Ptp->ts', den, Lpq_full[:, den_slice2, slice2], Lpq_full[:, slice1, den_slice1], optimize=True
     )
     return out
@@ -560,11 +561,11 @@ def contraction_2rdm_Lpq(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ
         n1 = nocc + nvir
     if label2 == 'i':
         # Slow but more readable version
-        # out = np.einsum("ij,kl,Ptk,Pjl->ti", occ_y_mat.conj(), occ_y_mat,
+        # out = lib.einsum("ij,kl,Ptk,Pjl->ti", occ_y_mat.conj(), occ_y_mat,
         #                 Lpq_full[:,slice1,slice_i],
         #                 Lpq_full[:,slice_i,slice_i],
         #                 optimize=True)
-        # out+= np.einsum("ij,cd,Ptc,Pjd->ti", occ_y_mat.conj(), vir_x_mat,
+        # out+= lib.einsum("ij,cd,Ptc,Pjd->ti", occ_y_mat.conj(), vir_x_mat,
         #                 Lpq_full[:,slice1,slice_a],
         #                 Lpq_full[:,slice_i,slice_a],
         #                 optimize=True)
@@ -584,11 +585,11 @@ def contraction_2rdm_Lpq(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ
             out += np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(j,i) -> (t,i)
     elif label2 == 'a':
         # Slow but more readable version
-        # out = np.einsum("ab,cd,Ptc,Pbd->ta", vir_x_mat.conj(), vir_x_mat,
+        # out = lib.einsum("ab,cd,Ptc,Pbd->ta", vir_x_mat.conj(), vir_x_mat,
         #                 Lpq_full[:,slice1,slice_a],
         #                 Lpq_full[:,slice_a,slice_a],
         #                 optimize=True)
-        # out+= np.einsum("ab,kl,Ptk,Pbl->ta", vir_x_mat.conj(), occ_y_mat,
+        # out+= lib.einsum("ab,kl,Ptk,Pbl->ta", vir_x_mat.conj(), occ_y_mat,
         #                 Lpq_full[:,slice1,slice_i],
         #                 Lpq_full[:,slice_a,slice_i],
         #                 optimize=True)
@@ -794,11 +795,11 @@ def contraction_2rdm_eri_chol(Gpq_chol, Lpq_full, nocc, nvir, nfrozen_occ, nfroz
     slice1 = choose_slice(label1, nfrozen_occ, nocc, nvir, nfrozen_vir)
     slice_p = choose_slice('p', nfrozen_occ, nocc, nvir, nfrozen_vir)
     if label2 == 'i':
-        out = np.einsum('Ppr,Ptr->tp', Gpq_chol[:, :nocc, :], Lpq_full[:, slice1, slice_p], optimize=True)
+        out = lib.einsum('Ppr,Ptr->tp', Gpq_chol[:, :nocc, :], Lpq_full[:, slice1, slice_p], optimize=True)
     elif label2 == 'a':
-        out = np.einsum('Ppr,Ptr->tp', Gpq_chol[:, nocc:, :], Lpq_full[:, slice1, slice_p], optimize=True)
+        out = lib.einsum('Ppr,Ptr->tp', Gpq_chol[:, nocc:, :], Lpq_full[:, slice1, slice_p], optimize=True)
     elif label2 == 'p':
-        out = np.einsum('Ppr,Ptr->tp', Gpq_chol, Lpq_full[:, slice1, slice_p], optimize=True)
+        out = lib.einsum('Ppr,Ptr->tp', Gpq_chol, Lpq_full[:, slice1, slice_p], optimize=True)
     else:
         raise ValueError('label2 = {}. is not valid in contraction_2rdm_eri_chol'.format(label2))
     return out
@@ -1004,7 +1005,7 @@ def get_I_int(i_p, d_p, den, mo_ene_full, Lpq_full, nocc, nvir, nfrozen_occ, nfr
     Returns:
         i_int: the I intermediates (nmo_full, nmo_full)
     """
-    i_int = -np.einsum('qp,p->pq', d_p, mo_ene_full)
+    i_int = -lib.einsum('qp,p->pq', d_p, mo_ene_full)
     slice_I = choose_slice('I', nfrozen_occ, nocc, nvir, nfrozen_vir)
     slice_a = choose_slice('a', nfrozen_occ, nocc, nvir, nfrozen_vir)
     # I all occupied-all occupied block
@@ -1179,7 +1180,6 @@ def make_rdm1_relaxed_pprpa(pprpa, mf, xy=None, mult='t', istate=0):
         raise NotImplementedError('hf_var = {}. is not implemented in make_rdm1_relaxed_pprpa'.format(hf_var))
 
 
-from pyscf import lib
 from pyscf.lib import logger
 from pyscf.grad import rks as rks_grad
 
@@ -1384,19 +1384,19 @@ def _contract_xc_kernel(mf, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=Tr
             rho1 = ni.eval_rho(mol, ao0, dmvo, mask, xctype, hermi=1, with_lapl=False) * 2  # *2 for alpha + beta
             if xctype == 'LDA':
                 rho1 = rho1[np.newaxis]
-            wv = np.einsum('yg,xyg,g->xg', rho1, fxc, weight)
+            wv = lib.einsum('yg,xyg,g->xg', rho1, fxc, weight)
             fmat_(mol, f1vo, ao, wv, mask, shls_slice, ao_loc)
 
             if dmoo is not None:
                 rho2 = ni.eval_rho(mol, ao0, dmoo, mask, xctype, hermi=1, with_lapl=False) * 2
                 if xctype == 'LDA':
                     rho2 = rho2[np.newaxis]
-                wv = np.einsum('yg,xyg,g->xg', rho2, fxc, weight)
+                wv = lib.einsum('yg,xyg,g->xg', rho2, fxc, weight)
                 fmat_(mol, f1oo, ao, wv, mask, shls_slice, ao_loc)
             if with_vxc:
                 fmat_(mol, v1ao, ao, vxc * weight, mask, shls_slice, ao_loc)
             if with_kxc:
-                wv = np.einsum('yg,zg,xyzg,g->xg', rho1, rho1, kxc, weight)
+                wv = lib.einsum('yg,zg,xyzg,g->xg', rho1, rho1, kxc, weight)
                 fmat_(mol, k1ao, ao, wv, mask, shls_slice, ao_loc)
     else:
         for ao, mask, weight, coords in ni.block_loop(mol, grids, nao, ao_deriv, max_memory):
@@ -1416,7 +1416,7 @@ def _contract_xc_kernel(mf, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=Tr
             rho1 = ni.eval_rho(mol, ao0, dmvo, mask, xctype, hermi=1, with_lapl=False)
             if xctype == 'LDA':
                 rho1 = rho1[np.newaxis]
-            wv = np.einsum('yg,xyg,g->xg', rho1, fxc_t, weight)
+            wv = lib.einsum('yg,xyg,g->xg', rho1, fxc_t, weight)
             fmat_(mol, f1vo, ao, wv, mask, shls_slice, ao_loc)
 
             if dmoo is not None:
@@ -1427,7 +1427,7 @@ def _contract_xc_kernel(mf, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=Tr
                 rho2 = ni.eval_rho(mol, ao0, dmoo, mask, xctype, hermi=1, with_lapl=False)
                 if xctype == 'LDA':
                     rho2 = rho2[np.newaxis]
-                wv = np.einsum('yg,xyg,g->xg', rho2, fxc_s, weight)
+                wv = lib.einsum('yg,xyg,g->xg', rho2, fxc_s, weight)
                 fmat_(mol, f1oo, ao, wv, mask, shls_slice, ao_loc)
             if with_vxc:
                 vxc = vxc[0]
@@ -1437,7 +1437,7 @@ def _contract_xc_kernel(mf, xc_code, dmvo, dmoo=None, with_vxc=True, with_kxc=Tr
                 # 1/2 int (tia - tIA) kxc (tjb - tJB) = tia kxc_t tjb
                 kxc = kxc[0, :, 0] - kxc[0, :, 1]
                 kxc = kxc[:, :, 0] - kxc[:, :, 1]
-                wv = np.einsum('yg,zg,xyzg,g->xg', rho1, rho1, kxc, weight)
+                wv = lib.einsum('yg,zg,xyzg,g->xg', rho1, rho1, kxc, weight)
                 fmat_(mol, k1ao, ao, wv, mask, shls_slice, ao_loc)
 
     f1vo[1:] *= -1
@@ -1545,7 +1545,7 @@ def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000, ao_cache=None):
         rho1 = eval_rho(mol, ao0, dmvo, mask, xctype, hermi=1, with_lapl=False) * 2  # *2 for alpha + beta
         if xctype == 'LDA':
             rho1 = rho1[np.newaxis]
-        wv = np.einsum('yg,xyg,g->xg', rho1, fxc, weight)
+        wv = lib.einsum('yg,xyg,g->xg', rho1, fxc, weight)
         fmat_(mol, f1vo, aok0, wv, mask, shls_slice, ao_loc)
 
     f1vo[1:] *= -1
