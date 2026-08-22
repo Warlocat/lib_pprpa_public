@@ -23,6 +23,20 @@ from lib_pprpa.solvent.ddcosmo import require_zero_mu
 from lib_pprpa.solvent.pcm import require_df_pcm
 
 
+# PySCF 2.12 sizes the three-center PCM derivative block directly from
+# ``pcmobj.max_memory``.  On large-memory nodes this can request a single
+# >2**31-element libcint buffer and segfault before NumPy can report an
+# allocation error.  This cap only changes batching; it does not approximate
+# or otherwise alter the PCM gradient.
+_PCM_GRAD_MEMORY_CAP_MB = 12000
+
+
+def _pcm_grad(solvent_obj, dm):
+    max_memory = min(float(solvent_obj.max_memory), _PCM_GRAD_MEMORY_CAP_MB)
+    with lib.temporary_env(solvent_obj, max_memory=max_memory):
+        return solvent_obj.grad(dm)
+
+
 def pcm_density_response_gradient(solvent_obj, dm_reference, dm_response):
     """Derivative of the PCM reference/response-density cross term.
 
@@ -38,8 +52,8 @@ def pcm_density_response_gradient(solvent_obj, dm_reference, dm_response):
         raise ValueError("dm_reference and dm_response must be equal-size AO matrices")
 
     try:
-        grad_plus = solvent_obj.grad(dm_reference + dm_response)
-        grad_minus = solvent_obj.grad(dm_reference - dm_response)
+        grad_plus = _pcm_grad(solvent_obj, dm_reference + dm_response)
+        grad_minus = _pcm_grad(solvent_obj, dm_reference - dm_response)
     finally:
         solvent_obj.kernel(dm_reference)
     return 0.5 * (grad_plus - grad_minus)
@@ -60,7 +74,7 @@ def grad_elec(pprpa_grad_obj, xy, mult, atmlst=None):
 
         reference_clock = "Calculate reference PCM gradient"
         start_clock(reference_clock)
-        de_reference_solvent = solvent_obj.grad(dm_reference)
+        de_reference_solvent = _pcm_grad(solvent_obj, dm_reference)
         stop_clock(reference_clock)
 
         response_clock = "Calculate ppRPA PCM response gradient"

@@ -6,7 +6,7 @@ import pytest
 pyscf = pytest.importorskip("pyscf")
 from pyscf import dft, gto
 
-from lib_pprpa.grad.pprpa_pcm import Gradients, pcm_density_response_gradient
+from lib_pprpa.grad.pprpa_pcm import Gradients, _pcm_grad, pcm_density_response_gradient
 from lib_pprpa.pprpa_davidson import ppRPA_Davidson
 from lib_pprpa.pyscf_util import get_pyscf_input_mol
 from lib_pprpa.solvent.pcm import (
@@ -77,6 +77,20 @@ def test_require_rejects_nonequilibrium_and_frozen_pcm():
     mf.with_solvent.frozen = True
     with pytest.raises(ValueError, match="Frozen PCM"):
         require_df_pcm(mf)
+
+
+def test_pcm_gradient_memory_cap_is_temporary():
+    class DummyPCM:
+        max_memory = 330000
+
+        def grad(self, dm):
+            return self.max_memory, dm
+
+    solvent_obj = DummyPCM()
+    used_memory, returned_dm = _pcm_grad(solvent_obj, "density")
+    assert used_memory == 12000
+    assert returned_dm == "density"
+    assert solvent_obj.max_memory == 330000
 
 
 def test_density_response_polarization_is_exact_and_restores_cache():
