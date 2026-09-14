@@ -26,8 +26,10 @@ MO-eri    (large):  lib_pprpa.gpu_ao2mo.gpu_ao2mo_blocks  -> active-space vvvv/o
 ```
 
 ## Software required
-- **gpu4pyscf** with working CUDA libraries (provides `gpu4pyscf.pbc.dft.KRKS`,
-  `pbc.df.fft_jk.get_k`, AFTDF `get_k_e1`, and `pbc.grad.krhf` primitives).
+- **gpu4pyscf** with working CUDA libraries and the periodic
+  `KRKS.gen_response` API (validated at exact upstream commit
+  `d65bd284b4802fc5081b199dec710a5f2d0c56ef`).  The GPU gradient also uses
+  `pbc.df.fft_jk.get_k`, AFTDF `get_k_e1`, and `pbc.grad.krhf` primitives.
 - **pyscf** (the periodic `gto`/`dft` driver and `lib_pprpa`).
 - **ase** (the BFGS optimizer used by `ase_utils.kernel`).
 - **lib_pprpa** on `PYTHONPATH`.
@@ -106,6 +108,10 @@ of the script — edit there for a different defect or charge state.
 
 ## Scope / notes
 - Gamma point, RKS/RHF reference, LDA/GGA/hybrid functionals.
+- The RKS CPHF/Z-vector solve uses native
+  `KRKS.gen_response(singlet=None, hermi=1)`, which caches the XC kernel once
+  for all response applications.  The ppRPA-specific nuclear XC-gradient
+  skeleton remains in `lib_pprpa.grad.grad_utils_gpu_pbc`.
 - The example uses the **AO-direct** GPU Davidson (library-only). At large active
   spaces the **MO-eri** path (GPU FFT ao2mo + batched `use_eri` contraction) is
   much faster — that is the path used for the NV-center production runs.
