@@ -1,14 +1,17 @@
 # GPU Gamma-point pp-RPA — requirements
 
-This folder has two GPU optimization examples:
+This folder has three GPU periodic examples:
 
 - **`pbc_pprpa_gamma_opt_gpu.py`** — small periodic cell, **AO-direct** energy path.
   Library-only (lib_pprpa + gpu4pyscf + ase). Runs in a few minutes on one GPU.
 - **`pbc_pprpa_gamma_opt_nv_gpu.py`** — large defect cell (NV-center style), **MO-eri**
   energy path with a frozen-core active space. Tunable `ke_cutoff` on the command
   line. This is the path used for the 63-atom NV production runs.
+- **`pbc_pprpa_gamma_gdf_gpu.py`** — small one-step **GDF-consistent** ppRPA
+  energy and analytical gradient. The reference, Davidson operator, CPHF
+  response, and every two-electron derivative all use periodic GDF.
 
-Both share the same back end:
+The two optimization examples share the same FFT/AFT back end:
 
 ```
 GPU KRKS SCF (gpu4pyscf)
@@ -117,3 +120,23 @@ of the script — edit there for a different defect or charge state.
   much faster — that is the path used for the NV-center production runs.
 - The CPU `make_rdm1_relaxed_rhf_pprpa` builds the relaxed density (small MO-space
   algebra); only `mf.get_k` for the 2-RDM term and the response are routed to GPU.
+
+## Fully GDF-consistent path
+
+`pbc_pprpa_gamma_gdf_gpu.py` is a separate backend. Construct a converged CPU
+PySCF periodic GDF reference, call
+`lib_pprpa.pbc_gdf.make_pprpa_gdf(mf, ...)`, and evaluate the state with
+`lib_pprpa.grad.pprpa_gamma_gdf_gpu.Gradients`. The solver records the exact
+SCF orbitals, auxiliary basis, metric threshold, mesh, and GDF object identity;
+the gradient fails rather than silently mixing a different reference or an
+FFT/AFT exchange derivative.
+
+Current scope is a real restricted three-dimensional Gamma-point reference,
+the pp/hh Davidson Lpq operator, HF or LDA/GGA/global-hybrid KS, and a full
+J+K GDF build. Range-separated hybrids and meta-GGAs are rejected. This path
+uses GPU4PySCF's internal periodic GDF derivative interface, including
+`hermi=2` for the antisymmetric pair density. Use the exact compatible
+GPU4PySCF revision cited in the validation report; the driver checks the
+required call signature at runtime. GDF auxiliary-basis convergence must be
+checked for the target system because it changes both the reference and ppRPA
+Hamiltonian.

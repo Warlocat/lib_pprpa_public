@@ -19,7 +19,7 @@ except ImportError:
     pass
 
 
-def get_xy_full(xy, oo_dim, mult='t'):
+def get_xy_full(xy, oo_dim, mult='t', nocc=None, nvir=None):
     """Expand the lower triangular xy matrix to the full matrix."""
     vv_dim = len(xy) - oo_dim
     if mult == 't':
@@ -42,6 +42,22 @@ def get_xy_full(xy, oo_dim, mult='t'):
         vir_x_mat = vir_x_mat + vir_x_mat.T
         np.fill_diagonal(occ_y_mat, 1.0 / np.sqrt(2.0) * occ_y_mat.diagonal())
         np.fill_diagonal(vir_x_mat, 1.0 / np.sqrt(2.0) * vir_x_mat.diagonal())
+
+    # The packed antisymmetric representation has zero elements when an
+    # active block contains a single orbital.  Its dimension therefore cannot
+    # be inferred from ``oo_dim``/``vv_dim`` alone.  Callers that know the
+    # active-space sizes can provide them explicitly to retain the required
+    # 1x1 zero block (rather than an ambiguous 0x0 block).
+    if nocc is not None and occ_y_mat.shape != (nocc, nocc):
+        if occ_y_mat.size or nocc != 1:
+            raise ValueError(
+                f"packed occupied-pair dimension is inconsistent with nocc={nocc}")
+        occ_y_mat = np.zeros((1, 1), dtype=xy.dtype)
+    if nvir is not None and vir_x_mat.shape != (nvir, nvir):
+        if vir_x_mat.size or nvir != 1:
+            raise ValueError(
+                f"packed virtual-pair dimension is inconsistent with nvir={nvir}")
+        vir_x_mat = np.zeros((1, 1), dtype=xy.dtype)
 
     return occ_y_mat, vir_x_mat
 
@@ -1556,4 +1572,3 @@ def _contract_xc_kernel_krks(mf, xc_code, dmvo, max_memory=2000, ao_cache=None):
     if k1ao is not None:
         k1ao[1:] *= -1
     return f1vo, f1oo, v1ao, k1ao
-

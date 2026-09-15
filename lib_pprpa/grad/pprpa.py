@@ -210,7 +210,8 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
     orbp = mf.mo_coeff[:, slice_p]
     orbi = mf.mo_coeff[:, slice_i]
     orba = mf.mo_coeff[:, slice_a]
-    occ_y_mat, vir_x_mat = get_xy_full(xy, oo_dim, mult)
+    occ_y_mat, vir_x_mat = get_xy_full(
+        xy, oo_dim, mult, nocc=nocc, nvir=nvir)
     if pprpa._use_eri and not hasattr(mf, 'cell'):
         # molecular fast path: contract 2-RDM with stored MO ERIs directly
         _, mo_ene_full, eri_full = pyscf_util.get_pyscf_input_mol_eri_r(mf, return_raw=True)
@@ -229,7 +230,15 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
         Y_eri = mf.mo_coeff.T @ Y_eri @ orbp
     else:
         if nfrozen_occ > 0 or nfrozen_vir > 0 or pprpa.Lpq is None:
-            _, mo_ene_full, Lpq_full = pyscf_util.get_pyscf_input_mol(mf)
+            # A periodic GDF solver has the same Lpq algebra as molecular DF,
+            # but its factors must be reconstructed with the periodic metric.
+            # Falling through to get_pyscf_input_mol used to silently replace
+            # the periodic operator whenever a frozen orbital was present (or
+            # after Davidson released the full Lpq tensor).
+            if hasattr(mf, 'cell'):
+                _, mo_ene_full, Lpq_full = pyscf_util.get_pyscf_input_sc(mf)
+            else:
+                _, mo_ene_full, Lpq_full = pyscf_util.get_pyscf_input_mol(mf)
         else:
             mo_ene_full = pprpa.mo_energy
             Lpq_full = pprpa.Lpq

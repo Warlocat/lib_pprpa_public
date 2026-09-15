@@ -43,6 +43,8 @@ Features
 
 * ppRPA analytic gradient
   Spin-restricted (spin-adapted), generalized
+  Three-dimensional real Gamma-point periodic GDF energy/operator/gradient
+  (GPU4PySCF derivative back end; see `examples/gpu/README.md`)
 
 * T-matrix for quasiparticle energy
   Spin-restricted

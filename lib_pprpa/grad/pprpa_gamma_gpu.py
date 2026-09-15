@@ -51,7 +51,7 @@ def _aftdf(cell, kpts):
     return adf
 
 
-def make_gpu_vresp(cell, mf):
+def make_gpu_vresp(cell, mf, gpu_mf=None):
     """Native GPU CPHF response (``singlet=None, hermi=1``) for Gamma KS.
 
     The native ``KRKS.gen_response`` object caches the XC kernel once and then
@@ -64,7 +64,19 @@ def make_gpu_vresp(cell, mf):
     kpts = np.asarray(mf.kpts).reshape(-1, 3)
     assert len(kpts) == 1 and abs(kpts).max() < 1e-9, \
         "GPU pp-RPA response is Gamma-point only"
-    kmf = gdft.KRKS(cell, kpts=kpts, xc=mf.xc)
+    if gpu_mf is None:
+        kmf = gdft.KRKS(cell, kpts=kpts, xc=mf.xc)
+    else:
+        kmf = gpu_mf
+        if not isinstance(kmf, gdft.KRKS):
+            raise TypeError("gpu_mf must be a gpu4pyscf periodic KRKS object")
+        if kmf.cell is not cell:
+            raise ValueError("gpu_mf and mf must use the same Cell object")
+        if len(np.asarray(kmf.kpts).reshape(-1, 3)) != 1 or not np.allclose(
+                np.asarray(kmf.kpts).reshape(-1, 3)[0], 0.0, atol=1e-9):
+            raise ValueError("gpu_mf must be a Gamma-point KRKS object")
+        if kmf.xc != mf.xc:
+            raise ValueError("gpu_mf and mf must use the same XC functional")
     native_method = getattr(type(kmf), "gen_response", None)
     native_cache = getattr(kmf._numint, "cache_xc_kernel1", None)
     native_fxc = getattr(kmf._numint, "nr_rks_fxc", None)
@@ -136,7 +148,8 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     pprpa_grad.rdm1e = P
     D = kmf_cpu.make_rdm1()[0]
     T = D + P
-    occ_y, vir_x = get_xy_full(xy, pprpa.oo_dim, mult)
+    occ_y, vir_x = get_xy_full(
+        xy, pprpa.oo_dim, mult, nocc=nocc, nvir=nvir)
     cocc = mo[:, nfo:nfo+nocc]
     cvir = mo[:, nfo+nocc:nfo+nocc+nvir]
     X = cvir @ vir_x @ cvir.T + cocc @ occ_y @ cocc.T
