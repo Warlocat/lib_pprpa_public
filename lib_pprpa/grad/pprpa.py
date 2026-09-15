@@ -164,12 +164,18 @@ def grad_elec_mf(mf, atmlst=None):
     return de
 
 
-def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20, cphf_conv_tol=1.0e-8, vresp=None):
+def make_rdm1_relaxed_rhf_pprpa(
+        pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20,
+        cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None):
     r"""Calculate relaxed density matrix (and the I intermediates)
         for given pprpa and mean-field object.
     Args:
         pprpa: a pprpa object.
         mf: a mean-field RHF/RKS object.
+        pair_get_k: optional callback ``pair_get_k(dms, hermi)`` for direct
+            exchange contractions of the two active pair densities.  This
+            avoids reconstructing full-system three-index factors when the
+            solver uses a compact active space.
     Returns:
         den_relaxed: the relaxed one-particle density matrix (nmo_full, nmo_full)
         i_int: the I intermediates (nmo_full, nmo_full)
@@ -212,6 +218,7 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
     orba = mf.mo_coeff[:, slice_a]
     occ_y_mat, vir_x_mat = get_xy_full(
         xy, oo_dim, mult, nocc=nocc, nvir=nvir)
+    use_pair_eri = pprpa._use_eri or pprpa._ao_direct or pair_get_k is not None
     if pprpa._use_eri and not hasattr(mf, 'cell'):
         # molecular fast path: contract 2-RDM with stored MO ERIs directly
         _, mo_ene_full, eri_full = pyscf_util.get_pyscf_input_mol_eri_r(mf, return_raw=True)
@@ -220,12 +227,16 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
         eri_full = None
         X_eri = np.matmul(eri_vv.reshape(-1, nvir*nvir), vir_x_mat.reshape(-1)).reshape(-1, nocc+nvir)
         Y_eri = np.matmul(eri_oo.reshape(-1, nocc*nocc), occ_y_mat.reshape(-1)).reshape(-1, nocc+nvir)
-    elif pprpa._use_eri or pprpa._ao_direct:
+    elif use_pair_eri:
         hermi = 1 if mult == 's' else 2
         mo_ene_full = mf.mo_energy
         X_ao = orba @ vir_x_mat @ orba.T
         Y_ao = orbi @ occ_y_mat @ orbi.T
-        X_eri, Y_eri = mf.get_k(dm=np.stack((X_ao, Y_ao)), hermi=hermi)
+        pair_dms = np.stack((X_ao, Y_ao))
+        if pair_get_k is None:
+            X_eri, Y_eri = mf.get_k(dm=pair_dms, hermi=hermi)
+        else:
+            X_eri, Y_eri = pair_get_k(pair_dms, hermi=hermi)
         X_eri = mf.mo_coeff.T @ X_eri @ orbp
         Y_eri = mf.mo_coeff.T @ Y_eri @ orbp
     else:
@@ -254,7 +265,7 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
     # calculate I' first
     i_prime = np.zeros((len(mo_ene_full), len(mo_ene_full)), dtype=occ_y_mat.dtype)
     # I' active-active block
-    if not pprpa._use_eri and not pprpa._ao_direct:
+    if not use_pair_eri:
         i_prime[slice_p, slice_p] += contraction_2rdm_Lpq(
             occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
         )
@@ -268,7 +279,7 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
 
     if nfrozen_vir > 0:
         # I' frozen virtual-active block
-        if not pprpa._use_eri and not pprpa._ao_direct:
+        if not use_pair_eri:
             i_prime[slice_ap, slice_p] += contraction_2rdm_Lpq(
                 occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
             )
@@ -279,7 +290,7 @@ def make_rdm1_relaxed_rhf_pprpa(pprpa, mf, xy=None, mult='t', istate=0, cphf_max
         i_prime[slice_ap, slice_i] += veff_den_u[slice_ap, slice_i]
     if nfrozen_occ > 0:
         # I' frozen occupied-active block
-        if not pprpa._use_eri and not pprpa._ao_direct:
+        if not use_pair_eri:
             i_prime[slice_ip, slice_p] += contraction_2rdm_Lpq(
                 occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
             )

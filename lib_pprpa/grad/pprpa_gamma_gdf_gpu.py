@@ -179,10 +179,21 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     kmf_cpu = _cpu.rhf_to_krhf(mf)
     kg_cpu = kmf_cpu.nuc_grad_method()
     vresp = make_gpu_vresp(cell, mf, gpu_mf=gpu_mf) if is_ks else None
+
+    # Contract the two active pair densities directly with the same GPU GDF
+    # factors.  Reconstructing a full periodic Lpq tensor here would scale as
+    # naux*nao**2 even when the Davidson problem uses a compact active space.
+    def pair_get_k(dms, hermi):
+        _, vk = gpu_mf.with_df.get_jk(
+            cp.asarray(dms), hermi=hermi, with_j=False, with_k=True,
+            exxdiv=None)
+        return cp.asnumpy(vk)
+
     p_mo, w_mo = make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=xy, mult=mult,
         cphf_max_cycle=pprpa_grad.cphf_max_cycle,
-        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp)
+        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
+        pair_get_k=pair_get_k)
 
     w = mo @ w_mo @ mo.T - kg_cpu.make_rdm1e(
         kmf_cpu.mo_energy, kmf_cpu.mo_coeff, kmf_cpu.mo_occ)[0]
