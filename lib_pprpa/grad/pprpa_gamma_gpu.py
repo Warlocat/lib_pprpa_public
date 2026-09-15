@@ -41,7 +41,6 @@ from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
-from lib_pprpa.grad.grad_utils_gpu_pbc import nr_rks_fxc as _nr_rks_fxc_gpu
 
 
 def _aftdf(cell, kpts):
@@ -52,32 +51,64 @@ def _aftdf(cell, kpts):
     return adf
 
 
-def make_gpu_vresp(cell, mf):
-    """GPU CPHF/orbital-hessian response (singlet=None, hermi=1) for Gamma KS.
+def make_gpu_vresp(cell, mf, gpu_mf=None):
+    """Native GPU CPHF response (``singlet=None, hermi=1``) for Gamma KS.
 
-    vresp(dm) = J[dm] + fxc(x)dm  (-0.5*hyb*K[dm] for hybrids).  Accepts and
-    returns numpy so it is a drop-in for the CPU ``vresp`` consumed by
-    make_rdm1_relaxed_rhf_pprpa; the grid response runs on the GPU.
+    The native ``KRKS.gen_response`` object caches the XC kernel once and then
+    applies ``J + fxc`` (and the hybrid exchange response) throughout the CPHF
+    solve.  This adapter only adds/removes the Gamma k-point axes and converts
+    between the CPU CPHF solver's NumPy arrays and CuPy.
     """
-    import cupy as cp
     from gpu4pyscf.pbc import dft as gdft
-    kmf = gdft.KRKS(cell, kpts=np.zeros((1, 3)), xc=mf.xc)
-    kmf.exxdiv = None
-    ni = kmf._numint
-    grids = kmf.grids
-    if grids.coords is None:
-        grids.build()
-    omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc)
-    kpts = np.zeros((1, 3))
-    dm0 = cp.asarray(mf.make_rdm1())
+
+    kpts = np.asarray(mf.kpts).reshape(-1, 3)
+    assert len(kpts) == 1 and abs(kpts).max() < 1e-9, \
+        "GPU pp-RPA response is Gamma-point only"
+    if gpu_mf is None:
+        kmf = gdft.KRKS(cell, kpts=kpts, xc=mf.xc)
+    else:
+        kmf = gpu_mf
+        if not isinstance(kmf, gdft.KRKS):
+            raise TypeError("gpu_mf must be a gpu4pyscf periodic KRKS object")
+        if kmf.cell is not cell:
+            raise ValueError("gpu_mf and mf must use the same Cell object")
+        if len(np.asarray(kmf.kpts).reshape(-1, 3)) != 1 or not np.allclose(
+                np.asarray(kmf.kpts).reshape(-1, 3)[0], 0.0, atol=1e-9):
+            raise ValueError("gpu_mf must be a Gamma-point KRKS object")
+        if kmf.xc != mf.xc:
+            raise ValueError("gpu_mf and mf must use the same XC functional")
+    native_method = getattr(type(kmf), "gen_response", None)
+    native_cache = getattr(kmf._numint, "cache_xc_kernel1", None)
+    native_fxc = getattr(kmf._numint, "nr_rks_fxc", None)
+    if not all(callable(fn) for fn in
+               (native_method, native_cache, native_fxc)):
+        raise RuntimeError(
+            "GPU pp-RPA gradients require the native periodic "
+            "KRKS.gen_response/cache_xc_kernel1/nr_rks_fxc implementation "
+            "introduced in GPU4PySCF commit 1cffe4a. Install that revision "
+            "or later together with its matching compiled libraries; a "
+            "Python-only backport is ABI-incompatible.")
+
+    kmf.exxdiv = mf.exxdiv
+    kmf.max_memory = mf.max_memory
+    kmf.verbose = mf.verbose
+    kmf.mo_coeff = cp.asarray(mf.mo_coeff)[None]
+    kmf.mo_energy = cp.asarray(mf.mo_energy)[None]
+    kmf.mo_occ = cp.asarray(mf.mo_occ)[None]
+    if kmf.grids.coords is None:
+        kmf.grids.build()
+
+    native_vresp = kmf.gen_response(singlet=None, hermi=1)
+    nao = cell.nao
 
     def vresp(dm):
         dmg = cp.asarray(dm)
-        v = _nr_rks_fxc_gpu(ni, cell, grids, mf.xc, dm0, dmg, kpts=kpts, hermi=1)
-        v = v + kmf.get_j(cell, dmg[None], hermi=1, kpts=kpts)[0]
-        if abs(hyb) > 1e-12:
-            v = v - 0.5 * hyb * kmf.get_k(cell, dmg[None], hermi=1, kpts=kpts)[0]
-        return cp.asnumpy(v)
+        if dmg.shape != (nao, nao):
+            raise ValueError(
+                f"Gamma CPHF response expects ({nao}, {nao}); got {dmg.shape}")
+        v = native_vresp(dmg.reshape(1, 1, nao, nao))
+        return cp.asnumpy(v[0, 0])
+
     return vresp
 
 
@@ -117,7 +148,8 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     pprpa_grad.rdm1e = P
     D = kmf_cpu.make_rdm1()[0]
     T = D + P
-    occ_y, vir_x = get_xy_full(xy, pprpa.oo_dim, mult)
+    occ_y, vir_x = get_xy_full(
+        xy, pprpa.oo_dim, mult, nocc=nocc, nvir=nvir)
     cocc = mo[:, nfo:nfo+nocc]
     cvir = mo[:, nfo+nocc:nfo+nocc+nvir]
     X = cvir @ vir_x @ cvir.T + cocc @ occ_y @ cocc.T
