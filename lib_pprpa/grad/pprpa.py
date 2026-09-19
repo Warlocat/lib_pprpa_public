@@ -166,7 +166,8 @@ def grad_elec_mf(mf, atmlst=None):
 
 def make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20,
-        cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None):
+        cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None,
+        cphf_x0=None, cphf_x0_out=None):
     r"""Calculate relaxed density matrix (and the I intermediates)
         for given pprpa and mean-field object.
     Args:
@@ -176,6 +177,15 @@ def make_rdm1_relaxed_rhf_pprpa(
             exchange contractions of the two active pair densities.  This
             avoids reconstructing full-system three-index factors when the
             solver uses a compact active space.
+    Args:
+        cphf_x0: optional AO-basis initial guess for the CPHF solution, as
+            returned through ``cphf_x0_out`` by an earlier call.  Along a
+            geometry optimization the previous step's solution is a good
+            guess and the solver then iterates only on the correction.
+        cphf_x0_out: optional dict.  When given, the converged CPHF
+            solution is stored in it under ``'cphf_x0_ao'`` in the AO
+            basis, ready to be handed back as ``cphf_x0``.
+
     Returns:
         den_relaxed: the relaxed one-particle density matrix (nmo_full, nmo_full)
         i_int: the I intermediates (nmo_full, nmo_full)
@@ -334,16 +344,71 @@ def make_rdm1_relaxed_rhf_pprpa(
     d_ao += d_ao.T
     x_int += reduce(np.dot, (orbA.T, vresp(d_ao) * 2, orbI))
 
+    log = logger.new_logger(mf)
+
+    # The Krylov vectors are small, (nvir_all, nocc_all), but the intermediates
+    # are (nao, nao).  On the periodic GPU path that is a large array crossing
+    # the bus twice per iteration, so when the response accepts device arrays
+    # keep the orbitals resident and do both transforms there; only the small
+    # vectors move.  The NumPy path below is the original one and the
+    # arithmetic is identical either way.
+    use_device = getattr(vresp, 'accepts_device_arrays', False)
+    if use_device:
+        import cupy
+        orbA_gpu = cupy.asarray(orbA)
+        orbI_gpu = cupy.asarray(orbI)
+    nresponse = [0]
+
     def fvind(x):
-        dm = reduce(np.dot, (orbA, x.reshape(nvir + nfrozen_vir, nocc + nfrozen_occ) * 2, orbI.T))
+        nresponse[0] += 1
+        shape = (nvir + nfrozen_vir, nocc + nfrozen_occ)
+        if use_device:
+            xd = cupy.asarray(x.reshape(shape)) * 2
+            dm = orbA_gpu @ xd @ orbI_gpu.T
+            v1ao = vresp(dm + dm.T)
+            return cupy.asnumpy(orbA_gpu.T @ v1ao @ orbI_gpu).ravel()
+        dm = reduce(np.dot, (orbA, x.reshape(shape) * 2, orbI.T))
         v1ao = vresp(dm + dm.T)
         return reduce(np.dot, (orbA.T, v1ao, orbI)).ravel()
 
-    from pyscf.scf import cphf
+    # pyscf.scf.cphf.solve does not forward an initial guess to lib.krylov, so
+    # solve_nos1 is inlined here to pass one.  With x0 None the arithmetic is
+    # identical to cphf.solve.
+    x0 = None
+    if cphf_x0 is not None and cphf_x0.shape == (mf.mol.nao, mf.mol.nao):
+        # The AO basis is not orthogonal, so C^T D C is not the inverse of
+        # C d C^T.  The MO coefficients of an AO matrix are C^T S D S C,
+        # because C^T S C = 1.  Without S the guess is distorted by the AO
+        # metric even when the geometry has not moved.
+        ovlp = np.asarray(mf.get_ovlp())
+        if ovlp.ndim == 3:
+            ovlp = ovlp[0]
+        x0 = reduce(np.dot, (orbA.T, ovlp.real, cphf_x0, ovlp.real, orbI))
 
-    d_prime[slice_A, slice_I] = cphf.solve(
-        fvind, mo_ene_full, mf.mo_occ, x_int, max_cycle=cphf_max_cycle, tol=cphf_conv_tol
-    )[0].reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
+    e_a = mo_ene_full[mf.mo_occ == 0]
+    e_i = mo_ene_full[mf.mo_occ > 0]
+    e_ai = 1 / (e_a[:, None] - e_i)
+    nvir_all, nocc_all_ = e_ai.shape
+    mo1base = x_int * -e_ai
+
+    def vind_vo(mo1):
+        v = fvind(mo1.reshape(-1, nvir_all, nocc_all_))
+        v = v.reshape(-1, nvir_all, nocc_all_) * e_ai
+        return v.reshape(-1, nvir_all * nocc_all_)
+
+    mo1 = lib.krylov(vind_vo, mo1base.reshape(-1, nvir_all * nocc_all_),
+                     x0=None if x0 is None else x0.reshape(-1, nvir_all * nocc_all_),
+                     tol=cphf_conv_tol, max_cycle=cphf_max_cycle, hermi=False)
+    d_prime[slice_A, slice_I] = mo1.reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
+
+    # Hand the solution back in the AO basis: between geometry steps the MO
+    # basis changes (new SCF, possible phase flips or reordering), and the AO
+    # matrix survives that.
+    if cphf_x0_out is not None:
+        cphf_x0_out['cphf_x0_ao'] = reduce(
+            np.dot, (orbA, d_prime[slice_A, slice_I], orbI.T))
+    log.debug('CPHF: %d response evaluations, device=%s, warm start=%s',
+              nresponse[0], use_device, x0 is not None)
     stop_clock('Calculate d_prime')
 
     start_clock('Calculate I intermediates')
