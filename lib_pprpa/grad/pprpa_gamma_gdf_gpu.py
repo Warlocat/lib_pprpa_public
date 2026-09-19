@@ -24,7 +24,8 @@ import numpy as np
 
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
-from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
+from lib_pprpa.grad.grad_utils_gpu_pbc import relaxed_xc_gradient as _xcg_gpu
+from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
 from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad.pprpa_gamma_gpu import make_gpu_vresp
 from lib_pprpa.pbc_gdf import validate_gdf_context, validate_gdf_mf
@@ -46,7 +47,7 @@ def _xc_coefficients(mf, gpu_mf):
     return float(omega), float(alpha), float(hybrid)
 
 
-def make_gpu_gdf_mf(mf):
+def make_gpu_gdf_mf(mf, gpu_df=None, gpu_grids=None):
     """Mirror a converged CPU Gamma GDF reference on GPU without changing it.
 
     The already-built CPU auxiliary basis (after any exponent pruning) is
@@ -60,29 +61,59 @@ def make_gpu_gdf_mf(mf):
         cpu_df.build(j_only=False)
 
     from gpu4pyscf.pbc import dft as gdft, scf as gscf
+    from gpu4pyscf.pbc.dft import BeckeGrids as GPUBeckeGrids
     from gpu4pyscf.pbc.df.df import GDF as GPU_GDF
+    from pyscf.pbc.dft.gen_grid import BeckeGrids as CPUBeckeGrids
 
     cell = mf.cell
     kpts = np.asarray(mf.kpts).reshape(-1, 3)
     if hasattr(mf, "xc"):
         gpu_mf = gdft.KRKS(cell, kpts=kpts, xc=mf.xc)
-        # Periodic CPU and GPU RKS both use UniformGrids by default.  Preserve
-        # an explicitly selected mesh because it defines the XC energy/response.
-        if getattr(getattr(mf, "grids", None), "mesh", None) is not None:
+        source_grids = getattr(mf, "grids", None)
+        if gpu_grids is not None:
+            # The caller supplies already-built GPU grids, so skip
+            # constructing (and later rebuilding) a fresh Becke grid.
+            gpu_mf.grids = gpu_grids
+            gpu_mf.pprpa_xc_density_epsilon = getattr(
+                mf, "pprpa_xc_density_epsilon", 1e-3)
+        elif isinstance(source_grids, CPUBeckeGrids):
+            gpu_mf.grids = GPUBeckeGrids(cell)
+            gpu_mf.grids.level = source_grids.level
+            gpu_mf.grids.atom_grid = copy.deepcopy(source_grids.atom_grid)
+            gpu_mf.grids.radi_method = source_grids.radi_method
+            gpu_mf.grids.prune = source_grids.prune
+            # A Becke relaxed-density response uses a central directional
+            # derivative in density space.  Allow callers to tighten it while
+            # keeping a validated default.
+            gpu_mf.pprpa_xc_density_epsilon = getattr(
+                mf, "pprpa_xc_density_epsilon", 1e-3)
+        # Periodic CPU and GPU RKS both otherwise use UniformGrids by default.
+        # Preserve an explicitly selected mesh because it defines the XC
+        # energy/response.
+        elif getattr(source_grids, "mesh", None) is not None:
             gpu_mf.grids.mesh = np.asarray(mf.grids.mesh, dtype=int)
     else:
         gpu_mf = gscf.KRHF(cell, kpts=kpts)
 
-    gpu_df = GPU_GDF(cell, kpts)
-    # Mirror the basis that actually generated the authoritative CPU CDERI,
-    # not merely a possibly mutated user-facing basis name.
-    gpu_df.auxbasis = copy.deepcopy(cpu_df.auxcell.basis)
-    gpu_df.exp_to_discard = None
-    gpu_df.linear_dep_threshold = cpu_df.linear_dep_threshold
     mesh = cpu_df.mesh if cpu_df.mesh is not None else cell.mesh
-    gpu_df.mesh = np.asarray(mesh, dtype=int)
-    gpu_df.is_gamma_point = True
-    gpu_df.build(j_only=False)
+    if gpu_df is None:
+        gpu_df = GPU_GDF(cell, kpts)
+        # Mirror the basis that actually generated the authoritative CPU
+        # CDERI, not merely a possibly mutated user-facing basis name.
+        gpu_df.auxbasis = copy.deepcopy(cpu_df.auxcell.basis)
+        gpu_df.exp_to_discard = None
+        gpu_df.linear_dep_threshold = cpu_df.linear_dep_threshold
+        gpu_df.mesh = np.asarray(mesh, dtype=int)
+        gpu_df.is_gamma_point = True
+        gpu_df.build(j_only=False)
+    else:
+        # A caller that already built the identical GPU GDF passes it in;
+        # verify it is the same object this function would have built.
+        if (not np.array_equal(np.asarray(gpu_df.mesh, dtype=int),
+                               np.asarray(mesh, dtype=int))
+                or gpu_df.linear_dep_threshold != cpu_df.linear_dep_threshold):
+            raise ValueError("supplied gpu_df does not match the CPU GDF "
+                             "(mesh or linear_dep_threshold differ)")
 
     gpu_mf.with_df = gpu_df
     gpu_mf.rsjk = None
@@ -171,7 +202,8 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     nfo = nocc_all - nocc
     mo = np.asarray(mf.mo_coeff)
 
-    gpu_mf = make_gpu_gdf_mf(mf)
+    gpu_mf = make_gpu_gdf_mf(mf, gpu_df=getattr(pprpa_grad, "gpu_df", None),
+                             gpu_grids=getattr(pprpa_grad, "gpu_grids", None))
     _, _, hybrid = _xc_coefficients(mf, gpu_mf)
     gpu_grad = gpu_mf.nuc_grad_method()
     gdf_deriv = _GDFDerivativeEngine(gpu_mf)
@@ -189,11 +221,18 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
             exxdiv=None)
         return cp.asnumpy(vk)
 
+    # Optional CPHF warm start across geometry steps.  A caller that keeps the
+    # Gradients object (or copies the attribute onto the next one) gets the
+    # previous solution as the initial guess; cphf_x0 None leaves the solve
+    # unchanged.
+    cphf_out = {}
     p_mo, w_mo = make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=xy, mult=mult,
         cphf_max_cycle=pprpa_grad.cphf_max_cycle,
         cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
-        pair_get_k=pair_get_k)
+        pair_get_k=pair_get_k, cphf_x0=pprpa_grad.cphf_x0,
+        cphf_x0_out=cphf_out)
+    pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
 
     w = mo @ w_mo @ mo.T - kg_cpu.make_rdm1e(
         kmf_cpu.mo_energy, kmf_cpu.mo_coeff, kmf_cpu.mo_occ)[0]
@@ -212,11 +251,11 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     natm = cell.natm
     de = np.zeros((natm, 3))
 
-    # One-electron skeleton (kinetic + local pseudopotential).
-    hcore_deriv = krhf_g.hcore_generator(gpu_grad, cell, gpu_mf.kpts)
-    for ia in range(natm):
-        de[ia] += cp.asnumpy(cp.einsum(
-            "kxij,kji->x", hcore_deriv(ia), tg[None]).real)
+    # One-electron skeleton (kinetic + local pseudopotential).  The per-atom
+    # hcore_generator closure re-evaluates every AO on the full uniform mesh
+    # for each atom; form the trace against the density once on the mesh and
+    # contract it in reciprocal space instead.
+    de += hcore_deriv_contracted(cell, gpu_mf.kpts, tg)
 
     # All reference-density Coulomb/exchange terms use the same GDF metric as
     # the ppRPA operator.  Q(D+P)-Q(P) isolates Q(D)+the D/P cross derivative.
@@ -243,15 +282,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     # XC potential skeleton and its response to the relaxed density.  This
     # helper contains no Coulomb/exchange term; those are entirely GDF above.
     if is_ks:
-        f1vo, v1ao = _cxk_gpu(
-            gpu_mf, mf.xc, pg, dm0=dg, with_vxc=True)
-        aoslices = cell.aoslice_by_atom()
-        for ia in range(natm):
-            p0, p1 = aoslices[ia, 2:]
-            de[ia] += cp.asnumpy(cp.einsum(
-                "xij,ij->x", v1ao[1:, p0:p1], tg[p0:p1]).real * 2)
-            de[ia] += cp.asnumpy(cp.einsum(
-                "xij,ij->x", f1vo[1:, p0:p1], dg[p0:p1]).real)
+        de += _xcg_gpu(gpu_mf, mf.xc, pg, dm0=dg)
 
     # Pulay overlap and nonlocal pseudopotential terms.
     s1 = gpu_grad.get_ovlp(cell, gpu_mf.kpts)
@@ -264,9 +295,16 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
 class Gradients(_cpu.Gradients):
     """Consistent periodic GDF ppRPA gradient driver."""
 
-    def __init__(self, pprpa, mf, mult="t", state=0):
+    def __init__(self, pprpa, mf, mult="t", state=0, gpu_df=None, gpu_grids=None):
         validate_gdf_context(pprpa, mf)
         self.mf = mf
+        # Optional pre-built GPU GDF and grids, so a caller driving many
+        # evaluations does not rebuild them every time.
+        self.gpu_df = gpu_df
+        self.gpu_grids = gpu_grids
+        # AO-basis CPHF solution of the previous evaluation, used as the
+        # initial guess for the next one.  See make_rdm1_relaxed_rhf_pprpa.
+        self.cphf_x0 = None
         self.base = pprpa
         self.mol = mf.cell
         self.cell = mf.cell
