@@ -102,13 +102,18 @@ def make_gpu_vresp(cell, mf, gpu_mf=None):
     nao = cell.nao
 
     def vresp(dm):
+        # Return CuPy when handed CuPy so a device-resident CPHF loop can avoid
+        # round-tripping the (nao, nao) matrices through the host every
+        # iteration.  NumPy in -> NumPy out, unchanged, for every other caller.
+        want_device = isinstance(dm, cp.ndarray)
         dmg = cp.asarray(dm)
         if dmg.shape != (nao, nao):
             raise ValueError(
                 f"Gamma CPHF response expects ({nao}, {nao}); got {dmg.shape}")
         v = native_vresp(dmg.reshape(1, 1, nao, nao))
-        return cp.asnumpy(v[0, 0])
+        return v[0, 0] if want_device else cp.asnumpy(v[0, 0])
 
+    vresp.accepts_device_arrays = True
     return vresp
 
 
