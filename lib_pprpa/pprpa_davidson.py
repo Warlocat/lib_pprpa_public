@@ -703,8 +703,20 @@ def _pprpa_expand_space(
     tri_row_o, tri_col_o = np.tril_indices(nocc, is_singlet-1)
     tri_row_v, tri_col_v = np.tril_indices(nvir, is_singlet-1)
 
-    # take only nRoot vectors, starting from first pp/hh channel
+    # Take only nRoot vectors, starting from the first state of the requested
+    # channel.  The subspace does not always hold nroot states of that channel:
+    # each vector is assigned to pp or hh by the sign of its metric norm, so an
+    # early iteration can leave fewer, or none at all.  Use however many are
+    # present and keep expanding, instead of indexing past the end of the
+    # slice.
     tmp = v_tri[first_state:(first_state+nroot)]
+    nfound = len(tmp)
+    if nfound == 0:
+        raise RuntimeError(
+            "ppRPA Davidson: the %s channel has no state in the current "
+            "subspace of %d vectors, so no residue vector can be formed. "
+            "Try a larger max_vec, a different trial vector set, or a "
+            "different number of roots." % (pprpa.channel, v_tri.shape[0]))
 
     # get the eigenvectors in the original space
     ntri = v_tri.shape[0]
@@ -712,14 +724,14 @@ def _pprpa_expand_space(
 
     # compute residue vectors
     residue = np.matmul(tmp, mv_prod[:ntri])
-    for i in range(nroot):
+    for i in range(nfound):
         residue[i][:pprpa.oo_dim] -= -exci[i] * pprpa.xy[i][:pprpa.oo_dim]
         residue[i][pprpa.oo_dim:] += -exci[i] * pprpa.xy[i][pprpa.oo_dim:]
 
     # check convergence
-    conv_record = np.zeros(shape=[nroot], dtype=bool)
+    conv_record = np.zeros(shape=[nfound], dtype=bool)
     max_residue = 0
-    for i in range(nroot):
+    for i in range(nfound):
         max_residue = max(max_residue, abs(np.max(residue[i])))
         conv_record[i] = True if len(
             residue[i][abs(residue[i]) > residue_thresh]) == 0 else False
@@ -735,7 +747,7 @@ def _pprpa_expand_space(
 
     # Schmidt orthogonalization
     ntri_old = ntri
-    for iroot in range(nroot):
+    for iroot in range(nfound):
         if conv_record[iroot] is True:
             continue
 
@@ -760,7 +772,10 @@ def _pprpa_expand_space(
             tri_vec[ntri] = residue[iroot] / np.sqrt(abs(inp))
             ntri = ntri + 1
 
-    conv = True if ntri_old == ntri else False
+    # Never report convergence while the subspace holds fewer states of the
+    # requested channel than the caller asked for; the missing roots have not
+    # been found yet.
+    conv = True if (ntri_old == ntri and nfound == nroot) else False
     return conv, ntri
 
 
