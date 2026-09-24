@@ -80,10 +80,10 @@ def test_get_k_lowrank_codensity_chunks(diamond, monkeypatch):
     ref = gpu_fft_k.get_k_lowrank(cell, cell.mesh, factors, ket=ket)
     ngrid = int(np.prod(cell.mesh))
     # room for two codensities per batch: rank 5 -> chunks 2, 2, 1; rank 3 -> 2, 1
-    # plan_budget keeps 512 MB back from a small free figure
-    budget = 2.5 * gpu_fft_k._FFT_BYTES * ngrid + 512 * 1024**2
+    budget = 2.5 * gpu_fft_k._FFT_BYTES * ngrid + 512 * 1024**2   # plan_budget keeps 512 MB
     assert gpu_fft_k._fft_batch(budget, ngrid, cell.mesh, 5, 6) == (1, 2)
-    monkeypatch.setattr(gpu_fft_k, "free_bytes", lambda: budget)
+    # get_k_lowrank first subtracts the resident grids and U of the rank-5 set
+    monkeypatch.setattr(gpu_fft_k, "free_bytes", lambda: budget + 8 * (2 * 5 + 2 * 6) * ngrid)
     got = gpu_fft_k.get_k_lowrank(cell, cell.mesh, factors, ket=ket)
     assert np.abs(got - ref).max() < 1e-12 * np.abs(ref).max()
 
