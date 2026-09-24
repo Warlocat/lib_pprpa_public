@@ -26,8 +26,13 @@ Usage:
 Example:
     python pbc_pprpa_gamma_opt_nv_gpu.py 3A2-geo.POSCAR.vasp 90 t 100 0
 
-REQUIREMENTS: see examples/gpu/README.md — in particular, at this scale the two
-gpu4pyscf blksize patches (fft_jk.py, aft_jk.py) ARE required to avoid OOM.
+Restart: a rerun in the same directory resumes.  The geometry is the last frame
+of opt.traj, the BFGS Hessian comes from bfgs.pkl (ASE's restart file), every
+SCF starts from the orbitals of the previous geometry in scf.chk, and the CPHF
+solution of the previous step seeds the next one within a run.  Delete the three
+files to start over.
+
+REQUIREMENTS: see examples/gpu/README.md.
 """
 import sys, os
 import numpy as np
@@ -35,15 +40,14 @@ import cupy as cp
 from ase.io import read
 from ase.io.extxyz import write_extxyz
 from pyscf.data.nist import BOHR
+from pyscf.lib import chkfile
 from pyscf.pbc import gto, dft as cdft
 from pyscf.pbc.tools.pyscf_ase import pyscf_to_ase_atoms
 from gpu4pyscf.pbc import dft as gdft
-from gpu4pyscf.pbc.df.fft import FFTDF
-from gpu4pyscf.pbc.df import fft_jk
 
 from lib_pprpa.pprpa_davidson import ppRPA_Davidson
 from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
-from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction
+from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
 from lib_pprpa.grad import pprpa_gamma          # noqa: F401 (attaches .Gradients)
 from lib_pprpa.grad import pprpa_gamma_gpu as gpugrad
 from lib_pprpa.grad import ase_utils
@@ -65,9 +69,12 @@ BASIS   = "gth-dzvp"
 PSEUDO  = "gth-pbe"
 NROOT   = max(5, ISTATE + 1)
 GAMMA   = np.zeros((1, 3))      # pp-RPA is Gamma-point only
+CHK, RESTART, TRAJ = "scf.chk", "bfgs.pkl", "opt.traj"
+_state = {"cphf_x0": None}      # CPHF warm start between geometry steps
 
-# read geometry + lattice from the input file (POSCAR or xyz)
-_at = read(GEOM)
+# read geometry + lattice from the input file (POSCAR or xyz), or resume
+RESUME = os.path.exists(TRAJ)
+_at = read(TRAJ, index=-1) if RESUME else read(GEOM)
 _SYM = _at.get_chemical_symbols()
 _A_BOHR = np.asarray(_at.cell) / BOHR          # lattice fixed during the opt
 _NATM = len(_SYM)
@@ -89,15 +96,17 @@ def build_cell(coords_bohr):
     return cell
 
 
-def _patch_gpu_getk(mf, cell):
-    fdf = FFTDF(cell, GAMMA)
-    def gk(dm=None, hermi=1, **kw):
-        dmg = cp.asarray(dm); single = dmg.ndim == 2
-        if single:
-            dmg = dmg[None]
-        K = cp.asnumpy(fft_jk.get_k(fdf, dmg, hermi=0, kpt=np.zeros(3), exxdiv=None))
-        return K[0] if single else K
-    mf.get_k = gk
+def scf_guess(mf):
+    """Density from the orbitals in mf.chkfile (the previous geometry), or None.
+
+    Built from the stored mo_coeff / mo_occ directly: pyscf's from_chk expects
+    a kpts record that the final gpu4pyscf dump does not keep.
+    """
+    if not os.path.exists(mf.chkfile):
+        return None
+    mo = chkfile.load(mf.chkfile, "scf/mo_coeff")
+    occ = chkfile.load(mf.chkfile, "scf/mo_occ")
+    return mf.make_rdm1(cp.asarray(mo), cp.asarray(occ))
 
 
 def _pipeline(cell, want_grad):
@@ -113,7 +122,8 @@ def _pipeline(cell, want_grad):
     kg = gdft.KRKS(cell, kpts=GAMMA, xc=XC)
     kg.exxdiv = None
     kg.conv_tol = 1e-9
-    kg.kernel()
+    kg.chkfile = CHK
+    kg.kernel(scf_guess(kg))
     mo = cp.asnumpy(kg.mo_coeff[0])
     moe = cp.asnumpy(kg.mo_energy[0])
     mo_occ = cp.asnumpy(kg.mo_occ[0])
@@ -150,12 +160,15 @@ def _pipeline(cell, want_grad):
         cp.get_default_memory_pool().free_all_blocks()
         return e_state
 
-    _patch_gpu_getk(mf, cell)
+    # the gradient needs xy and the orbitals, not the MO ERIs: free them first
+    release_gpu_eri(mp)
     xy = (mp.xy_s if MULT == "s" else mp.xy_t)[ISTATE]
     g = gpugrad.Gradients(mp, mf, MULT, ISTATE)
     g.cphf_max_cycle = 100
     g.cphf_conv_tol = 1e-7
+    g.cphf_x0 = _state["cphf_x0"]
     de = g.grad_elec(xy, MULT, range(_NATM)) + g.grad_nuc()
+    _state["cphf_x0"] = g.cphf_x0
     cp.get_default_memory_pool().free_all_blocks()
     return e_state, de
 
@@ -177,10 +190,11 @@ if __name__ == "__main__":
     cell = build_cell(_at.get_positions() / BOHR)
     print(f"### NV-style GPU Gamma pp-RPA opt: {cell.natm} atoms, nao={cell.nao}, "
           f"mesh={list(cell.mesh)}, ke={KE} Ha, channel={CHANNEL}, mult={MULT}, "
-          f"AS={AS} ###", flush=True)
+          f"AS={AS}{', resumed from ' + TRAJ if RESUME else ''} ###", flush=True)
     converged, cell_opt = ase_utils.kernel(
         cell, grad_func=grad_func, ene_func=ene_func,
-        logfile="opt_ase.log", fmax=FMAX, max_steps=MAXSTEPS)
+        logfile="opt_ase.log", fmax=FMAX, max_steps=MAXSTEPS,
+        restart=RESTART, trajectory=TRAJ, append_trajectory=RESUME)
     opt_ase = pyscf_to_ase_atoms(cell_opt)
     info={"converged":converged, "charge":CHARGE, "mult":MULT, "channel":CHANNEL, "istate":ISTATE, "ke_Ha":KE, "xc":XC, "nao":cell.nao}
     opt_ase.info.update(info)
