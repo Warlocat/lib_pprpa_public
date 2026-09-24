@@ -11,6 +11,8 @@ ever sees the even part of w.  On the Nyquist planes of an even mesh in a
 non-orthogonal cell w is not even, and the plain half kernel is off by 1e-8.
 '''
 
+import threading
+
 import numpy as np
 import cupy as cp
 import cupyx.scipy.fft as cufft
@@ -23,6 +25,9 @@ __all__ = ['ao_loop', 'mo_on_grid', 'codensity', 'half_kernel', 'coulomb_potenti
 
 _KPTS0 = np.zeros((1, 3))
 _GRID_BLK_MIN = 4096
+# Device threads (gpu_multi) take turns on the AO-grid passes: run on two devices
+# at once, mo_on_grid returned wrong MO grids (1e-4 to 1e-1 in the exchange).
+_AO_GRID_LOCK = threading.RLock()
 
 
 def ao_loop(cell, mesh, deriv=0, extra_per_point=0, blksize=None):
@@ -39,21 +44,27 @@ def ao_loop(cell, mesh, deriv=0, extra_per_point=0, blksize=None):
     if blksize is None:
         blksize = int(0.4 * free_bytes()) // (16 * ncomp * cell.nao + int(extra_per_point))
     blksize = max(1, min(ngrid, max(_GRID_BLK_MIN, blksize)))
-    for g0, g1 in lib.prange(0, ngrid, blksize):
-        ao = cp.asarray(gnumint.eval_ao_kpts(cell, coords[g0:g1], kpts=_KPTS0, deriv=deriv)[0])
-        yield g0, g1, (ao.T if deriv == 0 else ao)
+    with _AO_GRID_LOCK:
+        try:
+            for g0, g1 in lib.prange(0, ngrid, blksize):
+                ao = cp.asarray(
+                    gnumint.eval_ao_kpts(cell, coords[g0:g1], kpts=_KPTS0, deriv=deriv)[0])
+                yield g0, g1, (ao.T if deriv == 0 else ao)
+        finally:
+            cp.cuda.Device().synchronize()
 
 
 def mo_on_grid(cell, mo_coeffs, mesh, blksize=None):
     '''MO values on the uniform grid, one (nmo, ngrid) CuPy array per coefficient set;
     one AO evaluation serves every set.'''
     ngrid = int(np.prod(mesh))
-    mos = [cp.asarray(m, dtype=np.float64) for m in mo_coeffs]
-    outs = [cp.empty((m.shape[1], ngrid)) for m in mos]
-    extra = 8 * sum(m.shape[1] for m in mos)
-    for g0, g1, aoT in ao_loop(cell, mesh, extra_per_point=extra, blksize=blksize):
-        for out, m in zip(outs, mos):
-            out[:, g0:g1] = m.T @ aoT
+    with _AO_GRID_LOCK:
+        mos = [cp.asarray(m, dtype=np.float64) for m in mo_coeffs]
+        outs = [cp.empty((m.shape[1], ngrid)) for m in mos]
+        extra = 8 * sum(m.shape[1] for m in mos)
+        for g0, g1, aoT in ao_loop(cell, mesh, extra_per_point=extra, blksize=blksize):
+            for out, m in zip(outs, mos):
+                out[:, g0:g1] = m.T @ aoT
     return outs
 
 
