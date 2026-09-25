@@ -32,6 +32,17 @@ _FFT_BYTES = 48
 _FFT_BUDGET_FRAC = 0.3
 
 
+def _fft_batch(free, ngrid, mesh, r, nk):
+    '''(ket rows, codensities per row) of one FFT batch within ``free`` bytes.
+
+    Whole rows of r codensities while one fits; below that one row is split
+    into codensity chunks, since a single row alone is r * ngrid * _FFT_BYTES.
+    '''
+    nb = int(_FFT_BUDGET_FRAC * free) // (_FFT_BYTES * ngrid)
+    nb = max(1, min(nb, max_fft_batch(ngrid, mesh)))
+    return max(1, min(nk, nb // r)), min(r, nb)
+
+
 def get_k_lowrank(cell, mesh, factors, ket=None, verbose=None):
     '''K[D] @ ket for the low-rank densities D = L R^T.
 
@@ -54,15 +65,22 @@ def get_k_lowrank(cell, mesh, factors, ket=None, verbose=None):
         t0 = log.init_timer()
         phiL, phiR = mo_on_grid(cell, [L, R], mesh)
         r = phiL.shape[0]
-        # ket rows per FFT batch, r codensities each
-        kb = int(_FFT_BUDGET_FRAC * free_bytes()) // (_FFT_BYTES * ngrid * r)
-        kb = max(1, min(nk, kb, max_fft_batch(ngrid, mesh) // r))
         U = cp.empty((nk, ngrid))
+        kb, mb = _fft_batch(free_bytes(), ngrid, mesh, r, nk)
+        log.debug('low-rank exchange: %d ket rows x %d of %d codensities per FFT batch', kb, mb, r)
         for k0, k1 in lib.prange(0, nk, kb):
-            rho = (phiR[None] * phiK[k0:k1, None]).reshape(-1, ngrid)
-            vR = coulomb_potential(rho, mesh, w_half).reshape(k1 - k0, r, ngrid)
-            U[k0:k1] = contract('mg,kmg->kg', phiL, vR)
-        rho = vR = phiL = phiR = None
+            for m0, m1 in lib.prange(0, r, mb):
+                rho = (phiR[m0:m1][None] * phiK[k0:k1, None]).reshape(-1, ngrid)
+                vR = coulomb_potential(rho, mesh, w_half).reshape(k1 - k0, m1 - m0, ngrid)
+                rho = None
+                Um = contract('mg,kmg->kg', phiL[m0:m1], vR)
+                vR = None
+                if m0 == 0:
+                    U[k0:k1] = Um
+                else:
+                    U[k0:k1] += Um
+                Um = None
+        phiL = phiR = None
         K = cp.zeros((nao, nk))
         for g0, g1, aoT in ao_loop(cell, mesh):
             K += aoT @ U[:, g0:g1].T

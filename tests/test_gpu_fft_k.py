@@ -68,6 +68,25 @@ def test_get_k_lowrank_matches_dense(diamond):
     assert np.abs(got_ket - ref @ ket).max() < 1e-9 * scale
 
 
+def test_get_k_lowrank_codensity_chunks(diamond, monkeypatch):
+    """A budget below one ket row splits the row into codensity chunks; same K."""
+    from lib_pprpa import gpu_fft_k
+    cell, mf = diamond
+    rng = np.random.default_rng(2)
+    nao = cell.nao
+    factors = [(rng.standard_normal((nao, 5)), rng.standard_normal((nao, 5))),
+               (rng.standard_normal((nao, 3)), rng.standard_normal((nao, 3)))]
+    ket = mf.mo_coeff[:, :6]
+    ref = gpu_fft_k.get_k_lowrank(cell, cell.mesh, factors, ket=ket)
+    ngrid = int(np.prod(cell.mesh))
+    # room for two codensities per batch: rank 5 -> chunks 2, 2, 1; rank 3 -> 2, 1
+    budget = 2.5 * gpu_fft_k._FFT_BYTES * ngrid / gpu_fft_k._FFT_BUDGET_FRAC
+    assert gpu_fft_k._fft_batch(budget, ngrid, cell.mesh, 5, 6) == (1, 2)
+    monkeypatch.setattr(gpu_fft_k, "free_bytes", lambda: budget)
+    got = gpu_fft_k.get_k_lowrank(cell, cell.mesh, factors, ket=ket)
+    assert np.abs(got - ref).max() < 1e-12 * np.abs(ref).max()
+
+
 @pytest.mark.parametrize("mult", ("s", "t"))
 def test_pair_get_k_lowrank_callback(diamond, mult):
     """The callback recovers the factors from the dense pair densities and returns K @ orbp."""
