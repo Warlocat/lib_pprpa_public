@@ -15,7 +15,7 @@ W=energy-weighted dm, X=pp-RPA 2-RDM amplitude density):
   pairing : ek(0.5(X-X^T)) - ek(0.5(X+X^T)) via jk_energy_per_atom(sr=lr=2), AFTDF
   Vxc     : 2*einsum(v1ao[1:,atom], T) from grad_utils_gpu_pbc._contract_xc_kernel
   fxc     : 1*einsum(f1vo[1:,atom], D)  (same routine; factor 1 = CPU's 0.5*..*2)
-  PP nl   : krhf_g.vppnl_nuc_grad(T)
+  PP nl   : pp.vppnl_nuc_grad(T)
 
 Key conventions / gpu4pyscf quirks (see also grad_utils_gpu_pbc):
 * J derivatives use FFTDF (``get_j_e1`` exists, fast); K derivatives use AFTDF
@@ -131,6 +131,10 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
 
     from gpu4pyscf.pbc import dft as gdft, scf as gscf
     from gpu4pyscf.pbc.grad import krhf as krhf_g
+    # vppnl_nuc_grad lives in gpu4pyscf.pbc.grad.pp.  Until gpu4pyscf
+    # d99e556 it was also re-exported by pbc.grad.krhf; import it from its
+    # own module so this works on released gpu4pyscf.
+    from gpu4pyscf.pbc.grad.pp import vppnl_nuc_grad
 
     nocc_all = cell.nelectron // 2
     nocc, nvir = pprpa.nocc, pprpa.nvir
@@ -248,7 +252,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     # overlap (energy-weighted) and nonlocal pseudo-potential
     s1 = gg.get_ovlp(cell, kpts)
     de += krhf_g.contract_h1e_dm(cell, s1, Wg[None], hermi=1)
-    de += krhf_g.vppnl_nuc_grad(cell, T[None], kpts=kpts)
+    de += vppnl_nuc_grad(cell, T[None], kpts=kpts)
 
     return de[list(atmlst)] if not isinstance(atmlst, range) else de
 

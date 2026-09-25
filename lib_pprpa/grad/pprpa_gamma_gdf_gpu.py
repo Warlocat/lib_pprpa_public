@@ -195,6 +195,10 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         raise ValueError(f"invalid multiplicity {mult!r}")
 
     from gpu4pyscf.pbc.grad import krhf as krhf_g
+    # vppnl_nuc_grad lives in gpu4pyscf.pbc.grad.pp.  Until gpu4pyscf
+    # d99e556 it was also re-exported by pbc.grad.krhf; import it from its
+    # own module so this works on released gpu4pyscf.
+    from gpu4pyscf.pbc.grad.pp import vppnl_nuc_grad
 
     is_ks = hasattr(mf, "xc")
     nocc_all = cell.nelectron // 2
@@ -287,7 +291,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     # Pulay overlap and nonlocal pseudopotential terms.
     s1 = gpu_grad.get_ovlp(cell, gpu_mf.kpts)
     de += krhf_g.contract_h1e_dm(cell, s1, wg[None], hermi=1)
-    de += krhf_g.vppnl_nuc_grad(cell, total[None], kpts=gpu_mf.kpts)
+    de += vppnl_nuc_grad(cell, total[None], kpts=gpu_mf.kpts)
 
     return de[list(atmlst)]
 

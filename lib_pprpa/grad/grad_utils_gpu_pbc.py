@@ -31,6 +31,8 @@ def relaxed_xc_gradient(mf, xc_code, dmvo, dm0=None, kpts=None,
     from gpu4pyscf.pbc.dft import BeckeGrids
     from gpu4pyscf.pbc.grad import krks as pbc_krks_grad
 
+    from lib_pprpa.grad.pbc_xc_response import get_vxc_full_response_multi
+
     ni = mf._numint
     cell = mf.mol
     grids = mf.grids
@@ -68,10 +70,13 @@ def relaxed_xc_gradient(mf, xc_code, dmvo, dm0=None, kpts=None,
                 ni, cell, grids, xc_code, dm, kpts, hermi=1)
             return cp.asnumpy(value) if isinstance(value, cp.ndarray) else np.asarray(value)
 
-        # Iteration 2: one grid pass for all three densities instead of
-        # three passes each re-evaluating the same AOs and Becke weights.
+        # One grid pass for all three densities instead of three passes each
+        # re-evaluating the same AOs and Becke weights.  The batched routine is
+        # vendored in pbc_xc_response because it is not part of any released
+        # gpu4pyscf; see that module for how it differs from the upstream
+        # single-density krks.get_vxc_full_response it is adapted from.
         g0, gp, gm = (np.asarray(g) for g in
-                      pbc_krks_grad.get_vxc_full_response_multi(
+                      get_vxc_full_response_multi(
                           ni, cell, grids, xc_code,
                           [dm0, dm0 + density_epsilon * p, dm0 - density_epsilon * p],
                           kpts, hermi=1))
