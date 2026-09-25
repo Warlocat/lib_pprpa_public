@@ -170,15 +170,22 @@ class ASE_calculator(Calculator):
         else:
             raise NotImplementedError("Only energy and forces are implemented for ppRPA calculator.")
         
-def kernel(cell, grad_func, ene_func=None, logfile=None, fmax=0.05, max_steps=100, **kwargs):
+def kernel(cell, grad_func, ene_func=None, logfile=None, fmax=0.05, max_steps=100,
+           restart=None, trajectory=None, append_trajectory=False, **kwargs):
     '''Optimize the geometry using ASE.
+
+    ``restart`` and ``trajectory`` are ASE's BFGS restart file (the Hessian and
+    the last step) and trajectory file.  To resume an interrupted run, start
+    from the last trajectory frame and pass the same two files with
+    ``append_trajectory=True``.
     '''
     atoms = pyscf_to_ase_atoms(cell)
     atoms.calc = ASE_calculator(cell, grad_func=grad_func, ene_func=ene_func, **kwargs)
     if logfile is None:
         logfile = '-' # stdout
 
-    opt = BFGS(atoms, logfile=logfile)
+    opt = BFGS(atoms, logfile=logfile, restart=restart, trajectory=trajectory,
+               append_trajectory=append_trajectory)
     converged = opt.run(fmax=fmax, steps=max_steps)
 
     cell = cell.set_geom_(atoms.get_positions(), unit='Ang', a=atoms.cell, inplace=False)
