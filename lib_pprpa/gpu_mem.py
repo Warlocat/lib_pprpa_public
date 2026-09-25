@@ -10,10 +10,19 @@ buffer (about 6x on a B200).
 
 import cupy as cp
 
-__all__ = ['RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes', 'is_pinned']
+__all__ = ['RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes', 'is_pinned',
+           'needs_bluestein', 'max_fft_batch']
 
 # Leaves room for the trial vectors, the SCF arrays and the gradient intermediates.
 RESIDENT_VRAM_FRAC = 0.75
+
+# cuFFT rejects a batched plan of more than 2^31 - 1 elements when a transform
+# dimension has a prime factor above 127 and takes the Bluestein path
+# (CUFFT_INVALID_SIZE, e.g. the 151^3 mesh of the NV63 cell at ke = 600 Ha).
+# Direct-path meshes ran 1.5 x 2^31 on a B200, so they get that relaxed cap.
+CUFFT_MAX_PLAN_ELEMENTS = 2**31 - 1
+CUFFT_MAX_PLAN_ELEMENTS_DIRECT = int(1.5 * 2**31)
+_CUFFT_MAX_DIRECT_PRIME = 127
 
 
 def free_bytes():
@@ -47,3 +56,24 @@ def is_pinned(array):
     ``gpu4pyscf.lib.cupy_helper.pin_memory`` or any view of them).'''
     attrs = cp.cuda.runtime.pointerGetAttributes(array.ctypes.data)
     return attrs.type == cp.cuda.runtime.memoryTypeHost
+
+
+def _largest_prime_factor(n):
+    n = int(n)
+    largest, p = 1, 2
+    while p * p <= n:
+        while n % p == 0:
+            largest, n = p, n // p
+        p += 1
+    return max(largest, n) if n > 1 else largest
+
+
+def needs_bluestein(mesh):
+    '''True if a mesh dimension has a prime factor cuFFT cannot handle directly.'''
+    return any(_largest_prime_factor(n) > _CUFFT_MAX_DIRECT_PRIME for n in mesh)
+
+
+def max_fft_batch(ngrid, mesh):
+    '''Largest number of ``ngrid``-point transforms one cuFFT plan may batch.'''
+    limit = CUFFT_MAX_PLAN_ELEMENTS if needs_bluestein(mesh) else CUFFT_MAX_PLAN_ELEMENTS_DIRECT
+    return max(1, limit // int(ngrid))
