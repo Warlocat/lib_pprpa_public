@@ -41,6 +41,7 @@ from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
+from lib_pprpa.gpu_fft_k import pair_get_k_lowrank
 
 
 def _aftdf(cell, kpts):
@@ -148,9 +149,13 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         vresp = make_gpu_vresp(cell, mf)   # GPU grid response for the CPHF solve
     else:
         vresp = None
+    # The pair densities have rank <= the active space: build their exchange
+    # from the factors instead of the dense nao x nao FFT kernel.
+    orbp = mo[:, nfo:nfo + nocc + nvir]
     P_mo, W_mo = make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
-        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp)
+        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
+        pair_get_k=pair_get_k_lowrank(cell, mf, orbp))
     W = mo @ W_mo @ mo.T \
         - kg_cpu.make_rdm1e(kmf_cpu.mo_energy, kmf_cpu.mo_coeff, kmf_cpu.mo_occ)[0]
     P = mo @ P_mo @ mo.T
