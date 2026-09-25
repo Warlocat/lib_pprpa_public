@@ -8,11 +8,11 @@ overlap, J/K, Vxc, fxc, pseudo-potential) also runs on the GPU.
 
 Term -> gpu4pyscf primitive map (D=KS ref dm, P=relaxed corr dm, T=D+P,
 W=energy-weighted dm, X=pp-RPA 2-RDM amplitude density):
-  hcore   : krhf_g.hcore_generator, einsum('kxij,kji->x', h1ao, T)
+  hcore   : hcore_contracted.hcore_deriv_contracted(T)  (density on the mesh once)
   ovlp    : krhf_g.contract_h1e_dm(s1, W)            (note +=, W carries -dme0)
   J ref   : polarization Q(T)-Q(P) via jk_energy_per_atom(j=1,sr=lr=hyb), FFTDF
   hyb K   : Q(T)-Q(P) via jk_energy_per_atom(j=0,sr=lr=hyb), AFTDF   (only if hyb)
-  pairing : ek(0.5(X-X^T)) - ek(0.5(X+X^T)) via jk_energy_per_atom(sr=lr=2), AFTDF
+  pairing : gpu_pairing_force.pairing_k_force_lowrank(L, R) for X = L R^T, FFT
   Vxc     : 2*einsum(v1ao[1:,atom], T) from grad_utils_gpu_pbc._contract_xc_kernel
   fxc     : 1*einsum(f1vo[1:,atom], D)  (same routine; factor 1 = CPU's 0.5*..*2)
   PP nl   : krhf_g.vppnl_nuc_grad(T)
@@ -20,16 +20,19 @@ W=energy-weighted dm, X=pp-RPA 2-RDM amplitude density):
 Key conventions / gpu4pyscf quirks (see also grad_utils_gpu_pbc):
 * J derivatives use FFTDF (``get_j_e1`` exists, fast); K derivatives use AFTDF
   because FFTDF ``get_k_e1`` is NotImplemented.  AFT matches FFT to ~1e-8.
-* pp-RPA pairing exchange: ``get_ek_ip1`` assumes a symmetric density -> it gives
-  +Q_K for the antisymmetric part of X (triplet) and -Q_K for the symmetric part
-  (singlet); splitting X handles both.  sr/lr=2 because that routine carries the
-  SCF's 0.5 exchange factor while pp-RPA pairing is the full bare exchange.
+* pp-RPA pairing exchange: X = [C_v x, C_o y] [C_v, C_o]^T has rank <= nocc + nvir,
+  so its force is one FFT pass over the active-MO codensities plus a gradient-AO
+  pass; exact for a general X, no symmetric/antisymmetric split.
+* The 2-RDM exchange K[X], K[Y] of the relaxed density uses the same factors
+  (``gpu_fft_k.pair_get_k_lowrank``); the CPHF solution is kept on the
+  ``Gradients`` object (``cphf_x0``) as the warm start of the next geometry.
 
 Requirements / scope
 --------------------
 * Gamma point, RKS (or RHF) reference only; LDA/GGA functionals.
-* For large nao the AFT/FFT exchange kernels need the memory-adaptive ``blksize``
-  patch in ``pbc/df/{fft_jk,aft_jk}.py`` (else OOM at fine grids).
+* Hybrid functionals: the reference exchange force goes through the AFT
+  ``get_k_e1``, which at large nao needs the memory-adaptive ``blksize`` patch
+  in ``pbc/df/aft_jk.py`` (else OOM at fine grids).
 * Validated: vs CPU 2e-10 (C2 diamond, up to gth-tzv2p, singlet+triplet);
   vs finite difference 2.9e-7 (C2, off-grid).  Runs on the 63-atom NV cell.
 """
@@ -41,6 +44,9 @@ from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
+from lib_pprpa.gpu_fft_k import pair_get_k_lowrank
+from lib_pprpa.gpu_pairing_force import pairing_k_force_lowrank
+from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
 
 
 def _aftdf(cell, kpts):
@@ -144,9 +150,16 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         vresp = make_gpu_vresp(cell, mf)   # GPU grid response for the CPHF solve
     else:
         vresp = None
+    # The pair densities have rank <= the active space: build their exchange
+    # from the factors instead of the dense nao x nao FFT kernel.
+    orbp = mo[:, nfo:nfo + nocc + nvir]
+    cphf_out = {}
     P_mo, W_mo = make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
-        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp)
+        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
+        pair_get_k=pair_get_k_lowrank(cell, mf, orbp),
+        cphf_x0=pprpa_grad.cphf_x0, cphf_x0_out=cphf_out)
+    pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
     W = mo @ W_mo @ mo.T \
         - kg_cpu.make_rdm1e(kmf_cpu.mo_energy, kmf_cpu.mo_coeff, kmf_cpu.mo_occ)[0]
     P = mo @ P_mo @ mo.T
@@ -157,7 +170,9 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         xy, pprpa.oo_dim, mult, nocc=nocc, nvir=nvir)
     cocc = mo[:, nfo:nfo+nocc]
     cvir = mo[:, nfo+nocc:nfo+nocc+nvir]
-    X = cvir @ vir_x @ cvir.T + cocc @ occ_y @ cocc.T
+    # X = cvir x cvir^T + cocc y cocc^T = Lf Rf^T, rank <= nocc + nvir
+    Lf = np.hstack([cvir @ vir_x, cocc @ occ_y])
+    Rf = np.hstack([cvir, cocc])
 
     # --- GPU assembly --------------------------------------------------------
     if is_ks:
@@ -191,15 +206,14 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         kf.with_df = _aftdf(cell, kpts); kf.rsjk = None
         return kf
 
-    Dg, Pg, Tg, Wg, Xg = (cp.asarray(a) for a in (D, P, T, W, X))
+    Dg, Pg, Tg, Wg = (cp.asarray(a) for a in (D, P, T, W))
     aoslices = cell.aoslice_by_atom()
     natm = cell.natm
     de = cp.zeros((natm, 3))
 
-    # hcore (kinetic + local PP) contracted with the total density
-    hcore_deriv = krhf_g.hcore_generator(gg, cell, kpts)
-    for ia in range(natm):
-        de[ia] += cp.einsum('kxij,kji->x', hcore_deriv(ia), Tg[None]).real
+    # hcore (kinetic + local PP) contracted with the total density: the density
+    # goes on the mesh once instead of one (3, nao, nao) derivative per atom
+    de += cp.asarray(hcore_deriv_contracted(cell, kpts, T))
 
     # J reference via the polarization identity Q(D+P)-Q(P), batched (FFTDF).
     eJ = krhf_g.jk_energy_per_atom(
@@ -216,24 +230,9 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
                 omega=omega, exxdiv=exxdiv))
         de += dvk(Tg) - dvk(Pg)
 
-    # pp-RPA pairing exchange Tr[K[X]^x X] (AFTDF).  get_ek_ip1 assumes a
-    # symmetric density: it returns +Q_K for the antisymmetric part of X and
-    # -Q_K for the symmetric part (the sym/antisym exchange cross term is zero),
-    # so X is split.  A pure singlet/triplet has only one component, so the
-    # vanishing one is skipped.  sr/lr=2: jk_energy_per_atom's K carries the SCF
-    # 0.5 exchange factor while pp-RPA pairing is the full bare exchange.
-    def _pair(dm):
-        return cp.asarray(krhf_g.jk_energy_per_atom(
-            kaft, dm[None], kpts, j_factor=0.0, sr_factor=2.0, lr_factor=2.0,
-            omega=omega, exxdiv=None))
-    Xa = (Xg - Xg.T) * 0.5
-    Xs = (Xg + Xg.T) * 0.5
-    if kaft is None:
-        kaft = _kmf_aft()
-    if float(cp.abs(Xa).max()) > 1e-10:
-        de += _pair(Xa)
-    if float(cp.abs(Xs).max()) > 1e-10:
-        de -= _pair(Xs)
+    # pp-RPA pairing exchange force 2 sum_{i in A} sum_l (d_x K[X])_il X_il from
+    # the factors of X (exact for a general X)
+    de += cp.asarray(pairing_k_force_lowrank(cell, cell.mesh, Lf, Rf))
 
     # Vxc skeleton (contract with T) + fxc.P skeleton (contract with D)
     if is_ks:
@@ -255,6 +254,12 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
 
 class Gradients(_cpu.Gradients):
     """GPU pp-RPA Gamma-point gradient (see module docstring)."""
+
+    def __init__(self, pprpa, mf, mult="t", state=0):
+        super().__init__(pprpa, mf, mult=mult, state=state)
+        # AO-basis CPHF solution of the previous evaluation, used as the
+        # initial guess for the next one.  See make_rdm1_relaxed_rhf_pprpa.
+        self.cphf_x0 = None
 
     def grad_elec(self, xy, mult, atmlst):
         return grad_elec(self, xy, mult, atmlst)
