@@ -40,8 +40,9 @@ __all__ = ['gpu_ao2mo_blocks', 'PAIR_BLK_CAP']
 # also pass 70 GB each.
 PAIR_BLK_CAP = 5000
 # Bytes per pair-gridpoint: the R2C potential chain (rho, half spectrum, real
-# vR, cuFFT work area) and the two GEMM operand strips (vR and the inner codensity).
-_FFT_BYTES = 40
+# vR and the two cuFFT work areas, measured at 56.4 on a 159^3 mesh) and the two
+# GEMM operand strips (vR and the inner codensity).
+_FFT_BYTES = 56
 _GEMM_BYTES = 16
 # Share of the strip budget for the FFT sub-batch; the transform is ~0.1% of the
 # flops and only needs to keep cuFFT busy.
