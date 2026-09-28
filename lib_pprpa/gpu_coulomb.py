@@ -25,21 +25,23 @@ _KPTS0 = np.zeros((1, 3))
 _GRID_BLK_MIN = 4096
 
 
-def ao_loop(cell, mesh, extra_per_point=0, blksize=None):
-    '''Yield (g0, g1, aoT) with aoT the (nao, g1-g0) AO values on the uniform grid,
-    real at Gamma, in chunks sized so the (ngrid, nao) array is never resident.
+def ao_loop(cell, mesh, deriv=0, extra_per_point=0, blksize=None):
+    '''AO values on the uniform grid in chunks, so the (ngrid, nao) array is never resident.
 
-    ``extra_per_point`` is what the caller holds per grid point besides the
-    AO block and its evaluation transient.
+    Yields (g0, g1, aoT) with aoT (nao, g1-g0), real at Gamma, for ``deriv=0``;
+    with ``deriv=1`` the raw (4, g1-g0, nao) values and gradients.
+    ``extra_per_point`` is what the caller holds per grid point besides the AO
+    block and its evaluation transient.
     '''
     coords = cell.gen_uniform_grids(mesh)
     ngrid = len(coords)
+    ncomp = 1 + 3 * deriv
     if blksize is None:
-        blksize = int(0.4 * free_bytes()) // (16 * cell.nao + int(extra_per_point))
+        blksize = int(0.4 * free_bytes()) // (16 * ncomp * cell.nao + int(extra_per_point))
     blksize = max(1, min(ngrid, max(_GRID_BLK_MIN, blksize)))
     for g0, g1 in lib.prange(0, ngrid, blksize):
-        ao = gnumint.eval_ao_kpts(cell, coords[g0:g1], kpts=_KPTS0, deriv=0)[0]
-        yield g0, g1, cp.asarray(ao).T
+        ao = cp.asarray(gnumint.eval_ao_kpts(cell, coords[g0:g1], kpts=_KPTS0, deriv=deriv)[0])
+        yield g0, g1, (ao.T if deriv == 0 else ao)
 
 
 def mo_on_grid(cell, mo_coeffs, mesh, blksize=None):
