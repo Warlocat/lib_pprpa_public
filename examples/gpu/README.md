@@ -32,34 +32,35 @@ MO-eri    (large):  lib_pprpa.gpu_ao2mo.gpu_ao2mo_blocks  -> active-space vvvv/o
 - **gpu4pyscf** with working CUDA libraries and the periodic
   `KRKS.gen_response` API (validated at exact upstream commit
   `d65bd284b4802fc5081b199dec710a5f2d0c56ef`).  The GPU gradient also uses
-  `pbc.df.fft_jk.get_k`, AFTDF `get_k_e1`, and `pbc.grad.krhf` primitives.
+  AFTDF `get_k_e1` (hybrid functionals only) and `pbc.grad.krhf` primitives.
 - **pyscf** (the periodic `gto`/`dft` driver and `lib_pprpa`).
 - **ase** (the BFGS optimizer used by `ase_utils.kernel`).
 - **lib_pprpa** on `PYTHONPATH`.
 - A GPU (the small example fits in any modern GPU; NV-scale needs ~32-80 GB).
 
-## REQUIRED gpu4pyscf source patches (for large systems)
-We patched two gpu4pyscf files so the periodic exchange kernels don't OOM at
-large `nao` / fine mesh (e.g. the 63-atom NV cell, 819 AO, mesh 59^3). These are
-**pure-Python edits — no rebuild needed**, but a `git checkout`/reinstall of
-gpu4pyscf will wipe them, so re-apply from here. They are **NOT needed for the
-small example in this folder**, only for production-scale cells.
+## Restarts
 
-### 1. `gpu4pyscf/pbc/df/fft_jk.py` — `get_k_kpts` block size (~line 163)
-The hardcoded `blksize = 32` makes the `rho1/vR` intermediate
-(`~ blksize * nao * ngrids * 16 B`) OOM. Replace:
-```python
-blksize = 32
-```
-with:
-```python
-from gpu4pyscf.lib.cupy_helper import get_avail_mem
-blksize = max(1, min(32, int(get_avail_mem() * 0.2 / (nao * ngrids * 16))))
-```
+A rerun of either optimization script in the same directory resumes: the
+geometry comes from the last frame of `opt.traj`, the BFGS Hessian from
+`bfgs.pkl` (ASE's own restart file; `ase_utils.kernel` passes `restart=`,
+`trajectory=` and `append_trajectory=` through), and every SCF starts from the
+orbitals of the previous geometry in `scf.chk` (PySCF's checkpoint).  The CPHF
+solution of the previous step seeds the next one within a run
+(`Gradients.cphf_x0`).  ASE writes the Hessian before the trajectory frame, so
+a kill between the two repeats one step on resume.  Delete the three files to
+start over.
 
-### 2. `gpu4pyscf/pbc/df/aft_jk.py` — `get_ek_ip1` block size (~line 522)
-The K energy-gradient kernel (pp-RPA pairing-K and hybrid reference-K force)
-under-budgets its `nao^2 * blk` arrays. Change the divisor factor `*2` -> `*8`:
+## gpu4pyscf source patch (hybrid functionals at large systems)
+The exchange terms of the pp-RPA gradient (the 2-RDM exchange of the relaxed
+density and the pairing force) are built from the low-rank factors of the pair
+densities and need no patch.  Only the hybrid reference exchange force still
+goes through the AFT kernel below, whose fixed block size OOMs at large `nao` /
+fine mesh.  It is a **pure-Python edit — no rebuild needed**, but a
+`git checkout`/reinstall of gpu4pyscf will wipe it.
+
+### `gpu4pyscf/pbc/df/aft_jk.py` — `get_ek_ip1` block size (~line 522)
+The K energy-gradient kernel under-budgets its `nao^2 * blk` arrays. Change the
+divisor factor `*2` -> `*8`:
 ```python
 # from:
 blksize = int(avail_mem/(nao**2*bvk_ncells*16*2))//16*16
@@ -67,7 +68,7 @@ blksize = int(avail_mem/(nao**2*bvk_ncells*16*2))//16*16
 blksize = int(avail_mem/(nao**2*bvk_ncells*16*8))//16*16
 ```
 
-Keep `.orig_bak` backups next to each file; to revert, copy them back.
+Keep an `.orig_bak` backup next to the file; to revert, copy it back.
 
 ## MO-eri version (`pbc_pprpa_gamma_opt_nv_gpu.py`) — what it additionally needs
 
@@ -83,9 +84,11 @@ on the GPU — about 4 orders of magnitude faster per Davidson solve (≈0.3 s v
      `_contract_compact` in real space; validated to ~1e-13 vs CPU reference).
    - `lib_pprpa.pprpa_eri_gpu` — `attach_gpu_eri_contraction(mp, vvvv, oovv, oooo)`
      swaps the Davidson matvec to a batched `use_eri` GPU contraction.
-2. **The two blksize patches above ARE required here** (the small AO-direct example
-   does not need them). At NV scale (819 AO, mesh 59³) the unpatched exchange and
-   K-gradient kernels OOM.
+2. **Memory at scale.** The three active-space ERI blocks stay on the device
+   when they fit 75% of its memory and are otherwise assembled in pinned host
+   memory and streamed per Davidson iteration; the 216-atom NV cell at AS=300
+   (194 GB of ERIs) runs on one 183 GB B200 that way and needs about 400 GB of
+   host memory.
 3. **A geometry file** (POSCAR/`.vasp` or `.xyz`) — read via ASE; the lattice is
    taken from it and held fixed during the relaxation.
 4. **Enough GPU memory.** The peak is the FFT ao2mo, not the stored ERIs: the
@@ -119,7 +122,8 @@ of the script — edit there for a different defect or charge state.
   spaces the **MO-eri** path (GPU FFT ao2mo + batched `use_eri` contraction) is
   much faster — that is the path used for the NV-center production runs.
 - The CPU `make_rdm1_relaxed_rhf_pprpa` builds the relaxed density (small MO-space
-  algebra); only `mf.get_k` for the 2-RDM term and the response are routed to GPU.
+  algebra); the 2-RDM exchange (`gpu_fft_k.pair_get_k_lowrank`, from the low-rank
+  factors of the pair densities) and the response run on the GPU.
 
 ## Fully GDF-consistent path
 

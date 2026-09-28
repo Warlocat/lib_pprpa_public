@@ -19,16 +19,20 @@ Run:
     # in the GPU env (see README.md), with lib_pprpa + gpu4pyscf on PYTHONPATH
     python pbc_pprpa_gamma_opt_gpu.py            # default: lowest triplet, pp channel
     python pbc_pprpa_gamma_opt_gpu.py s          # lowest singlet
+
+A rerun in the same directory resumes from the last frame of opt.traj with the
+BFGS Hessian in bfgs.pkl and the SCF orbitals in scf.chk (see README.md).
 """
+import os
 import sys
 import numpy as np
 import cupy as cp
+from pyscf.lib import chkfile
 from pyscf.pbc import gto, dft as cdft
 from pyscf.pbc.tools.pyscf_ase import pyscf_to_ase_atoms
 from gpu4pyscf.pbc import dft as gdft
-from gpu4pyscf.pbc.df.fft import FFTDF
-from gpu4pyscf.pbc.df import fft_jk
 
+from ase.io import read
 from ase.io.extxyz import write_extxyz
 from lib_pprpa.grad.ase_utils import pprpaobj, kernel as ase_opt
 from lib_pprpa.pprpa_davidson_gpu import attach_gpu_contraction
@@ -45,6 +49,8 @@ NROOT    = 2
 FMAX     = 0.05          # eV/Ang convergence
 MAXSTEPS = 15
 KPTS     = np.zeros((1, 3))     # Gamma point
+CHK, RESTART, TRAJ = "scf.chk", "bfgs.pkl", "opt.traj"
+_state   = {"cphf_x0": None}    # CPHF warm start between geometry steps
 
 
 def build_cell(coords=None):
@@ -65,17 +71,17 @@ def build_cell(coords=None):
     return cell
 
 
-def _patch_gpu_getk(mf, cell):
-    """Route mf.get_k (used by the relaxed-density 2-RDM term in the gradient)
-    onto the GPU via gpu4pyscf fft_jk.get_k."""
-    fdf = FFTDF(cell, KPTS)
-    def gk(dm=None, hermi=1, **kw):
-        dmg = cp.asarray(dm); single = dmg.ndim == 2
-        if single:
-            dmg = dmg[None]
-        K = cp.asnumpy(fft_jk.get_k(fdf, dmg, hermi=0, kpt=np.zeros(3), exxdiv=None))
-        return K[0] if single else K
-    mf.get_k = gk
+def scf_guess(mf):
+    """Density from the orbitals in mf.chkfile (the previous geometry), or None.
+
+    Built from the stored mo_coeff / mo_occ directly: pyscf's from_chk expects
+    a kpts record that the final gpu4pyscf dump does not keep.
+    """
+    if not os.path.exists(mf.chkfile):
+        return None
+    mo = chkfile.load(mf.chkfile, "scf/mo_coeff")
+    occ = chkfile.load(mf.chkfile, "scf/mo_occ")
+    return mf.make_rdm1(cp.asarray(mo), cp.asarray(occ))
 
 
 def _pipeline(cell, want_grad):
@@ -87,7 +93,8 @@ def _pipeline(cell, want_grad):
     kg = gdft.KRKS(cell, kpts=KPTS, xc=XC)
     kg.exxdiv = None
     kg.conv_tol = 1e-9
-    kg.kernel()
+    kg.chkfile = CHK
+    kg.kernel(scf_guess(kg))
 
     # 2) lightweight CPU RKS shell carrying the GPU orbitals (pprpaobj reads numpy)
     mf = cdft.RKS(cell, xc=XC)
@@ -113,11 +120,12 @@ def _pipeline(cell, want_grad):
         cp.get_default_memory_pool().free_all_blocks()
         return e_state
 
-    # 4) GPU Gamma-point gradient (relaxed density uses GPU get_k)
-    _patch_gpu_getk(mf, cell)
+    # 4) GPU Gamma-point gradient (low-rank exchange of the pair densities built in)
     xy = (mp.xy_s if MULT == "s" else mp.xy_t)[ISTATE]
     g = gpugrad.Gradients(mp, mf, MULT, ISTATE)
+    g.cphf_x0 = _state["cphf_x0"]
     de = g.grad_elec(xy, MULT, range(cell.natm)) + g.grad_nuc()
+    _state["cphf_x0"] = g.cphf_x0
     cp.get_default_memory_pool().free_all_blocks()
     return e_state, de
 
@@ -138,12 +146,14 @@ def ene_func(cell, **kw):
 
 
 if __name__ == "__main__":
-    cell = build_cell()
+    resume = os.path.exists(TRAJ)
+    cell = build_cell(read(TRAJ, index=-1).get_positions() if resume else None)
     print(f"### GPU Gamma pp-RPA opt: {cell.natm} atoms, nao={cell.nao}, "
-          f"mesh={list(cell.mesh)}, channel={CHANNEL}, mult={MULT}, xc={XC} ###",
-          flush=True)
+          f"mesh={list(cell.mesh)}, channel={CHANNEL}, mult={MULT}, xc={XC}"
+          f"{', resumed from ' + TRAJ if resume else ''} ###", flush=True)
     converged, cell_opt = ase_opt(cell, grad_func=grad_func, ene_func=ene_func,
-                                  logfile="-", fmax=FMAX, max_steps=MAXSTEPS)
+                                  logfile="-", fmax=FMAX, max_steps=MAXSTEPS,
+                                  restart=RESTART, trajectory=TRAJ, append_trajectory=resume)
     opt_ase = pyscf_to_ase_atoms(cell_opt)
     info={"converged":converged, "charge":CHARGE, "mult":MULT, "channel":CHANNEL, "istate":ISTATE, "xc":XC, "nao":cell.nao}
     opt_ase.info.update(info)
@@ -155,5 +165,5 @@ if __name__ == "__main__":
 #   * use a frozen-core active space: pprpaobj(mf, CHANNEL, AS_size=N, mo_eri=False)
 #   * for the energy solve, the MO-eri path (GPU FFT ao2mo + batched use_eri
 #     contraction) is much faster than AO-direct at large active spaces
-#   * large nao / fine mesh REQUIRES the gpu4pyscf blksize patches — see README.md
+#   * hybrid functionals at large nao / fine mesh need the aft_jk blksize patch — see README.md
 # ---------------------------------------------------------------------------
