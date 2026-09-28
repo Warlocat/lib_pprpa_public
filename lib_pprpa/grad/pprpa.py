@@ -176,7 +176,10 @@ def make_rdm1_relaxed_rhf_pprpa(
         pair_get_k: optional callback ``pair_get_k(dms, hermi)`` for direct
             exchange contractions of the two active pair densities.  This
             avoids reconstructing full-system three-index factors when the
-            solver uses a compact active space.
+            solver uses a compact active space.  A callback with a true
+            ``accepts_ket`` attribute is called as ``pair_get_k(dms, hermi,
+            ket=orbp)`` and returns ``K @ orbp`` (nao, nact): only those
+            columns are ever used.
     Args:
         cphf_x0: optional AO-basis initial guess for the CPHF solution, as
             returned through ``cphf_x0_out`` by an earlier call.  Along a
@@ -245,10 +248,14 @@ def make_rdm1_relaxed_rhf_pprpa(
         pair_dms = np.stack((X_ao, Y_ao))
         if pair_get_k is None:
             X_eri, Y_eri = mf.get_k(dm=pair_dms, hermi=hermi)
+            X_eri, Y_eri = X_eri @ orbp, Y_eri @ orbp
+        elif getattr(pair_get_k, 'accepts_ket', False):
+            X_eri, Y_eri = pair_get_k(pair_dms, hermi=hermi, ket=orbp)
         else:
             X_eri, Y_eri = pair_get_k(pair_dms, hermi=hermi)
-        X_eri = mf.mo_coeff.T @ X_eri @ orbp
-        Y_eri = mf.mo_coeff.T @ Y_eri @ orbp
+            X_eri, Y_eri = X_eri @ orbp, Y_eri @ orbp
+        X_eri = mf.mo_coeff.T @ X_eri
+        Y_eri = mf.mo_coeff.T @ Y_eri
     else:
         if nfrozen_occ > 0 or nfrozen_vir > 0 or pprpa.Lpq is None:
             # A periodic GDF solver has the same Lpq algebra as molecular DF,
