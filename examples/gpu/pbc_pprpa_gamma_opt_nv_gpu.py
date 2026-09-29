@@ -146,8 +146,7 @@ def _pipeline(cell, want_grad):
     # GPU FFT ao2mo (active-space MO ERI) + GPU batched use_eri Davidson
     cocc = mo[:, nfo:nfo + nocc]
     cvir = mo[:, nfo + nocc:nfo + nocc + nvir]
-    vvvv, oovv, oooo = gpu_ao2mo_blocks(cell, cocc, cvir, cell.mesh, return_gpu=True,
-                                        devices=DEVICES)
+    vvvv, oovv, oooo = gpu_ao2mo_blocks(cell, cocc, cvir, cell.mesh, devices=DEVICES)
     mp = ppRPA_Davidson(nocc, moe[nfo:nfo + nact], Lpq=None, channel=CHANNEL,
                         nroot=NROOT, residue_thresh=1e-9, trial="identity")
     mp.mu = 0.0

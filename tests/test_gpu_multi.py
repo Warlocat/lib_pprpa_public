@@ -71,14 +71,17 @@ def test_ao2mo_two_workers_match_one(diamond):
 @pytest.mark.parametrize("multi", ("s", "t"))
 def test_split_mvp_matches_resident(diamond, multi):
     from lib_pprpa.pprpa_davidson import ppRPA_Davidson, _pprpa_contraction
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
     rng = np.random.default_rng(3)
     nocc, nvir = 5, 7
-    nv2, no2 = nvir * nvir, nocc * nocc
-    V, O = rng.standard_normal((nv2, nv2)), rng.standard_normal((no2, no2))
-    vvvv = ((V + V.T) * 0.5).reshape(nvir, nvir, nvir, nvir)
-    oooo = ((O + O.T) * 0.5).reshape(nocc, nocc, nocc, nocc)
-    oovv = rng.standard_normal((nocc, nocc, nvir, nvir))
+    # real orbitals on a grid: the packed form assumes every ERI symmetry
+    phi = rng.standard_normal((nocc + nvir, 40))
+    W = rng.standard_normal((40, 40)) / 40
+    rho = np.einsum("pg,qg->pqg", phi, phi)
+    phys = np.einsum("pqg,gh,rsh->pqrs", rho, W + W.T, rho).transpose(0, 2, 1, 3)
+    vvvv = np.ascontiguousarray(phys[nocc:, nocc:, nocc:, nocc:])
+    oovv = np.ascontiguousarray(phys[:nocc, :nocc, nocc:, nocc:])
+    oooo = np.ascontiguousarray(phys[:nocc, :nocc, :nocc, :nocc])
     moe = rng.standard_normal(nocc + nvir)
 
     def solver():
@@ -93,9 +96,12 @@ def test_split_mvp_matches_resident(diamond, multi):
     tv = rng.standard_normal((6, cpu.full_dim))
     ref = _pprpa_contraction(cpu, tv)
     gpu = solver()
-    attach_gpu_eri_contraction(gpu, vvvv, oovv, oooo, mode="split", devices=TWO)
-    assert gpu._gpu_eri_split is not None and gpu._gpu_vvvv is None
-    np.testing.assert_allclose(gpu.contraction(tv), ref, rtol=1e-11, atol=1e-11)
+    packed = pack_eri(vvvv, oovv, oooo)
+    for rows in (None, 2):
+        attach_gpu_eri_contraction(gpu, *packed, mode="split", devices=TWO, rows=rows)
+        assert gpu._gpu_eri_split is not None and gpu._gpu_eri_pieces is None
+        assert all(len(part) > 0 for part in gpu._gpu_eri_split[1])
+        np.testing.assert_allclose(gpu.contraction(tv), ref, rtol=1e-11, atol=1e-11)
     release_gpu_eri(gpu)
     assert not hasattr(gpu, "_gpu_eri_split")
 

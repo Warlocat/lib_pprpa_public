@@ -80,15 +80,15 @@ on the GPU — about 4 orders of magnitude faster per Davidson solve (≈0.3 s v
 
 1. **Two extra lib_pprpa modules** (now shipped in the package):
    - `lib_pprpa.gpu_ao2mo` — `gpu_ao2mo_blocks(cell, cocc, cvir, mesh, …)` builds the
-     active-space `vvvv` / `oovv` / `oooo` blocks via GPU FFT ao2mo (mirrors PySCF's
-     `_contract_compact` in real space; validated to ~1e-13 vs CPU reference).
+     active-space `vvvv` / `oovv` / `oooo` blocks via GPU FFT ao2mo as packed pair
+     Gram matrices (the lower triangle of `(pq|rs)` over `p >= q` pairs; 8x smaller
+     than the physicist `vvvv`, 2x for `oovv`), assembled in pinned host memory.
    - `lib_pprpa.pprpa_eri_gpu` — `attach_gpu_eri_contraction(mp, vvvv, oovv, oooo)`
-     swaps the Davidson matvec to a batched `use_eri` GPU contraction.
-2. **Memory at scale.** The three active-space ERI blocks stay on the device
-   when they fit 75% of its memory and are otherwise assembled in pinned host
-   memory and streamed per Davidson iteration; the 216-atom NV cell at AS=300
-   (194 GB of ERIs) runs on one 183 GB B200 that way and needs about 400 GB of
-   host memory.
+     swaps the Davidson matvec to a batched GPU contraction that unfolds the packed
+     blocks on the device per iteration; `pack_eri` converts physicist tensors.
+2. **Memory at scale.** The packed blocks stay on the device when they fit 75%
+   of its memory and are otherwise streamed in row chunks per Davidson iteration;
+   the 216-atom NV cell at AS=300 (49 GB packed) is resident on one H200 or B200.
 3. **A geometry file** (POSCAR/`.vasp` or `.xyz`) — read via ASE; the lattice is
    taken from it and held fixed during the relaxation.
 4. **Enough GPU memory.** The peak is the FFT ao2mo, not the stored ERIs: the
