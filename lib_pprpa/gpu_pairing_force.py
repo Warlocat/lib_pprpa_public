@@ -27,9 +27,10 @@ from lib_pprpa.gpu_mem import free_bytes, max_fft_batch
 
 __all__ = ['pairing_k_force_lowrank']
 
-# Bytes per (codensity, grid point) in one FFT batch: rho, half spectrum, real
-# potential, the cuFFT work area and the scratch for the W updates.
-_FFT_BYTES = 48
+# Bytes per (codensity, grid point) in one FFT batch: one coulomb_potential call
+# peaks at 56.4 (codensities, half spectrum, real output, two cuFFT work areas,
+# measured on the 159^3 mesh, see gpu_ao2mo) plus 8 for the scratch of the W updates.
+_FFT_BYTES = 64
 _FFT_BUDGET_FRAC = 0.3
 
 
@@ -57,10 +58,10 @@ def pairing_k_force_lowrank(cell, mesh, L, R, verbose=None):
     n_idx, m_idx = np.tril_indices(r)
     npair = len(n_idx)
     n_dev, m_dev = cp.asarray(n_idx, dtype=np.int32), cp.asarray(m_idx, dtype=np.int32)
+    W = cp.zeros((r, ngrid))
     blk = int(_FFT_BUDGET_FRAC * free_bytes()) // (_FFT_BYTES * ngrid)
     blk = max(1, min(npair, blk, max_fft_batch(ngrid, mesh)))
     scratch = cp.empty((blk, ngrid))
-    W = cp.zeros((r, ngrid))
     for p0, p1 in lib.prange(0, npair, blk):
         V = coulomb_potential(codensity(phiR, phiR, n_dev, m_dev, p0, p1), mesh, w_half)
         rows, starts = np.unique(n_idx[p0:p1], return_index=True)
