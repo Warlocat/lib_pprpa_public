@@ -13,27 +13,28 @@ The trace only needs the density on the mesh,
 so this module puts the density on the mesh once and turns each atom into a
 reciprocal-space dot product by Parseval's theorem.  The remaining h1 slice
 terms, the AO-centre derivative of the kinetic and local pseudopotential
-integrals, are cheap slices of the derivative integrals ``get_hcore`` already
-returns.
+integrals, are cheap slices of the derivative integrals of ``get_hcore``.
 
 The plane-wave sum is blocked.  The unblocked form holds several
 ``(natm, ngrids)`` complex arrays at once, which for a 215-atom cell with
 1.7e7 plane waves is about 200 GB and exceeds any single GPU; blocking bounds
 peak memory without changing the arithmetic or the per-element reduction
-order.
+order.  The same blocks give the total local potential, so the derivative
+integrals are built here rather than by ``gpu4pyscf.pbc.grad.krhf.get_hcore``,
+which forms those ``(natm, ngrids)`` arrays whole.
 
 Gamma point only.
 """
 
 import numpy as np
 import cupy as cp
-from gpu4pyscf.lib.cupy_helper import get_avail_mem
+from lib_pprpa.gpu_mem import free_bytes
+from gpu4pyscf.lib.cupy_helper import contract
 from gpu4pyscf.pbc import tools
-from gpu4pyscf.pbc.df.aft import get_SI
 from gpu4pyscf.pbc.dft import numint as pbc_numint
 from gpu4pyscf.pbc.dft.gen_grid import UniformGrids
-from gpu4pyscf.pbc.grad.krhf import get_hcore
-from pyscf.pbc.gto.pseudo.pp import get_vlocG
+from gpu4pyscf.pbc.gto import int1e
+from pyscf.pbc.gto.pseudo.pp import get_alphas, get_vlocG
 from gpu4pyscf.pbc.tools.pbc import get_coulG
 
 
@@ -75,11 +76,14 @@ def hcore_deriv_contracted(cell, kpts, dm):
     # only bounds peak memory.  Verified bit-identical on NV63.
     atom_coords = cp.asarray(cell.atom_coords())      # (natm, 3)
     Z = None if cell._pseudo else cp.asarray(cell.atom_charges(), dtype=cp.float64)
+    # get_coulG zeroes the first G it is given as G = 0, so it takes the whole mesh
+    coulG = None if cell._pseudo else get_coulG(cell, mesh=mesh, Gv=Gv)
     # ~6 (natm, blk) complex temporaries live at once; keep them under a fifth
-    # of free device memory.
+    # of the memory the driver reports free.
     bytes_per_g = max(1, natm * 16 * 6)
-    blk = int(max(1, min(ngrids, int(get_avail_mem() * 0.2) // bytes_per_g)))
+    blk = int(max(1, min(ngrids, int(free_bytes() * 0.2) // bytes_per_g)))
     de = cp.zeros((natm, 3))
+    vG = cp.empty(ngrids, dtype=cp.complex128)        # total local potential in G space
     for g0 in range(0, ngrids, blk):
         g1 = min(g0 + blk, ngrids)
         Gv_b = Gv[g0:g1]
@@ -89,15 +93,26 @@ def hcore_deriv_contracted(cell, kpts, dm):
             vlocG_b = cp.asarray(get_vlocG(cell, cp.asnumpy(Gv_b)))
             coef_b = 1j * SI_b * vlocG_b
         else:
-            coulG_b = get_coulG(cell, mesh=mesh, Gv=Gv_b)
-            coef_b = 1j * Z[:, None] * SI_b * coulG_b
+            coef_b = 1j * Z[:, None] * SI_b * coulG[g0:g1]
         # vloc_g[A,x,G] = Gv[G,x] * coef[A,G]
         de += cp.einsum('gx,ag->ax', Gv_b, (coef_b.conj() * rho_G[g0:g1])).real
+        # get_hcore's -sum_a SI vlocG (pseudo) and -sum_a Z SI coulG (all-electron)
+        vG[g0:g1] = 1j * coef_b.sum(axis=0)
         SI_b = coef_b = None
     de /= ngrids
+    if cell._pseudo:
+        vG[0] = np.sum(get_alphas(cell))
 
     # --- AO-centre (h1 slice) terms ---------------------------------------
-    h1 = get_hcore(cell, kpts)                        # (nk, 3, nao, nao) derivative ints
+    # (nk, 3, nao, nao) derivative integrals, as gpu4pyscf.pbc.grad.krhf.get_hcore
+    h1 = int1e.int1e_ipkin(cell, kpts)
+    vlocR = tools.ifft(vG, mesh).real[grids.argsort()]
+    g0 = g1 = 0
+    for ao_ks, weight, coords in ni.block_loop(cell, grids, 1, kpts, sort_grids=True):
+        ao_ks = ao_ks.transpose(0, 1, 3, 2)           # (nk, comp, nao, blk)
+        g0, g1 = g1, g1 + len(weight)
+        aow = ao_ks[:, 0] * vlocR[g0:g1]
+        contract('kxig,kjg->kxij', ao_ks[:, 1:].conj(), aow, beta=1, out=h1)
     aoslices = cell.aoslice_by_atom()
     for ia in range(natm):
         p0, p1 = aoslices[ia, 2:]
