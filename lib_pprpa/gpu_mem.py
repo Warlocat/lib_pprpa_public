@@ -26,12 +26,17 @@ _CUFFT_MAX_DIRECT_PRIME = 127
 
 
 def free_bytes():
-    '''Free device memory as the driver reports it.
+    '''Free device memory as the driver reports it, after releasing what cupy caches.
 
     gpu4pyscf's ``get_avail_mem`` is 90% of the total less the memory pool's
     usage; its allocator sends large blocks straight to cudaMalloc, so that
-    figure does not move when the ERI tensors fill the device.
+    figure does not move when the ERI tensors fill the device.  The pool's free
+    blocks and this thread's cached cuFFT plans (each keeps its work area) are
+    released first: neither can serve a block over the allocator's 100 MB
+    threshold.  Call it where a block size is planned, not inside an FFT loop.
     '''
+    cp.get_default_memory_pool().free_all_blocks()
+    cp.fft.config.get_plan_cache().clear()
     return cp.cuda.runtime.memGetInfo()[0]
 
 
