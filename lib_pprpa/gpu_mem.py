@@ -1,17 +1,18 @@
 '''Device- and host-memory bookkeeping shared by the GPU ao2mo and Davidson ERI paths.
 
-The active-space MO ERIs are three float64 blocks, vvvv (nvir^4), oooo (nocc^4)
-and oovv (nocc^2 nvir^2).  They are kept resident on the device when they fit
-``RESIDENT_VRAM_FRAC`` of its total memory and staged on the host otherwise.
-Host-staged blocks live in page-locked (pinned) memory so that streaming them
-to the device runs at the link rate instead of through the driver's bounce
-buffer (about 6x on a B200).
+The active-space MO ERIs are three float64 blocks stored as the lower triangles
+of their pair Gram matrices (``gpu_ao2mo``): vvvv and oooo over the compact
+pairs, oovv over all occupied-virtual pairs.  They are kept resident on the
+device when they fit ``RESIDENT_VRAM_FRAC`` of its total memory and streamed
+from the host otherwise.  Host blocks live in page-locked (pinned) memory so
+that streaming them to the device runs at the link rate instead of through the
+driver's bounce buffer (about 6x on a B200).
 '''
 
 import cupy as cp
 
-__all__ = ['RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes', 'is_pinned',
-           'needs_bluestein', 'max_fft_batch']
+__all__ = ['RESIDENT_VRAM_FRAC', 'pack_offset', 'eri_bytes', 'fits_resident', 'free_bytes',
+           'is_pinned', 'needs_bluestein', 'max_fft_batch']
 
 # Leaves room for the trial vectors, the SCF arrays and the gradient intermediates.
 RESIDENT_VRAM_FRAC = 0.75
@@ -26,19 +27,32 @@ _CUFFT_MAX_DIRECT_PRIME = 127
 
 
 def free_bytes():
-    '''Free device memory as the driver reports it.
+    '''Free device memory as the driver reports it, after releasing what cupy caches.
 
     gpu4pyscf's ``get_avail_mem`` is 90% of the total less the memory pool's
     usage; its allocator sends large blocks straight to cudaMalloc, so that
-    figure does not move when the ERI tensors fill the device.
+    figure does not move when the ERI tensors fill the device.  The pool's free
+    blocks and this thread's cached cuFFT plans (each keeps its work area) are
+    released first: neither can serve a block over the allocator's 100 MB
+    threshold.  Call it where a block size is planned, not inside an FFT loop.
     '''
+    cp.get_default_memory_pool().free_all_blocks()
+    cp.fft.config.get_plan_cache().clear()
     return cp.cuda.runtime.memGetInfo()[0]
 
 
+def pack_offset(n):
+    '''Offset of row ``n`` of a packed lower triangle, n (n + 1) / 2: the number
+    of pairs p >= q of n orbitals, and the length of an n-row triangle.'''
+    n = int(n)
+    return n * (n + 1) // 2
+
+
 def eri_bytes(nocc, nvir):
-    '''Bytes of vvvv + oooo + oovv as float64.'''
+    '''Bytes of the packed vvvv + oooo + oovv as float64.'''
     nocc, nvir = int(nocc), int(nvir)
-    return (nvir**4 + nocc**4 + nocc**2 * nvir**2) * 8
+    return 8 * (pack_offset(pack_offset(nvir)) + pack_offset(pack_offset(nocc))
+                + pack_offset(nocc * nvir))
 
 
 def fits_resident(nocc, nvir, extra_bytes=0, total_bytes=None, frac=RESIDENT_VRAM_FRAC):

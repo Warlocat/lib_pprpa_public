@@ -113,20 +113,33 @@ def _aft_pairing_force(cell, mf, X):
 
 
 @pytest.mark.parametrize("mult", ("s", "t"))
-def test_pairing_force_matches_aft(system, mult):
-    """AFT and FFT exchange derivatives agree to ~1e-8; the low-rank form is exact in X."""
+@pytest.mark.parametrize("store_phil", (True, False))
+@pytest.mark.parametrize("pairs_per_batch", (None, 7))
+def test_pairing_force_matches_aft(system, mult, store_phil, pairs_per_batch, monkeypatch):
+    """AFT and FFT exchange derivatives agree to ~1e-8; the low-rank form is exact in X.
+
+    phiL stored or rebuilt per block, the pairs in one FFT batch or in batches of 7
+    (rows split across batches), all reproduce the stored single-batch result.
+    """
+    from scipy.linalg import block_diag
+    import lib_pprpa.gpu_pairing_force as pf
     from lib_pprpa.grad.grad_utils import get_xy_full
-    from lib_pprpa.gpu_pairing_force import pairing_k_force_lowrank
     cell, mf, nocc, _ = system
     mp, xy = _solve(system, mult)
     nvir = cell.nao - nocc
     occ_y, vir_x = get_xy_full(xy, mp.oo_dim, mult, nocc=nocc, nvir=nvir)
     cocc, cvir = mf.mo_coeff[:, :nocc], mf.mo_coeff[:, nocc:]
     X = cvir @ vir_x @ cvir.T + cocc @ occ_y @ cocc.T
+    C, M = np.hstack([cvir, cocc]), block_diag(vir_x, occ_y)
     ref = _aft_pairing_force(cell, mf, X)
-    got = pairing_k_force_lowrank(cell, cell.mesh, np.hstack([cvir @ vir_x, cocc @ occ_y]),
-                                  np.hstack([cvir, cocc]))
+    one = pf.pairing_k_force_lowrank(cell, cell.mesh, C, M, store_phil=True)
+    if pairs_per_batch is not None:
+        ngrid = int(np.prod(cell.mesh))
+        budget = (pairs_per_batch + 0.5) * (pf._FFT_BYTES + 8) * ngrid / pf._FFT_BUDGET_FRAC
+        monkeypatch.setattr(pf, "free_bytes", lambda: int(budget))
+    got = pf.pairing_k_force_lowrank(cell, cell.mesh, C, M, store_phil=store_phil)
     assert np.abs(got - ref).max() < 1e-6 * np.abs(ref).max()
+    assert np.abs(got - one).max() < 1e-11 * np.abs(one).max()
 
 
 @pytest.mark.parametrize("mult", ("s", "t"))
