@@ -20,6 +20,8 @@ whole MO rows at a time, and capped at ``PAIR_BLK_CAP``.
 The three finals stay on the device when they fit ``gpu_mem.RESIDENT_VRAM_FRAC``
 of its memory and are otherwise assembled in pinned host memory, which the
 streamed Davidson contraction (``pprpa_eri_gpu``) then uploads at the link rate.
+With several ``devices`` the outer strips are dispatched over them
+(``gpu_multi``) and the finals are always host-staged.
 '''
 
 import math
@@ -32,6 +34,7 @@ from gpu4pyscf.pbc import tools as gtools
 
 from lib_pprpa.gpu_coulomb import codensity, coulomb_potential, half_kernel, mo_on_grid
 from lib_pprpa.gpu_mem import eri_bytes, fits_resident, free_bytes, max_fft_batch
+from lib_pprpa.gpu_multi import default_devices, each, run
 
 __all__ = ['gpu_ao2mo_blocks', 'PAIR_BLK_CAP']
 
@@ -40,8 +43,9 @@ __all__ = ['gpu_ao2mo_blocks', 'PAIR_BLK_CAP']
 # also pass 70 GB each.
 PAIR_BLK_CAP = 5000
 # Bytes per pair-gridpoint: the R2C potential chain (rho, half spectrum, real
-# vR, cuFFT work area) and the two GEMM operand strips (vR and the inner codensity).
-_FFT_BYTES = 40
+# vR and the two cuFFT work areas, measured at 56.4 on a 159^3 mesh) and the two
+# GEMM operand strips (vR and the inner codensity).
+_FFT_BYTES = 56
 _GEMM_BYTES = 16
 # Share of the strip budget for the FFT sub-batch; the transform is ~0.1% of the
 # flops and only needs to keep cuFFT busy.
@@ -132,14 +136,15 @@ def _write_tile(out, tile, layout, pa, pb, ra, rb):
             out[:r + 1, :p + 1, r, p] = TT
 
 
-def _plan_strips(layout, ngrid, mesh, pair_blk=None):
+def _plan_strips(layout, ngrid, mesh, pair_blk=None, nshare=1):
     '''(pair_blk, fft_blk): GEMM strip width and FFT sub-batch from free memory.
 
     The FFT sub-batch takes ``_FFT_BUDGET_FRAC`` of the budget within the cuFFT
     plan cap; the strip then solves 8 b^2 + 16 ngrid b <= rest (a b x b tile
-    plus the two operand strips), rounded to whole rows and capped.
+    plus the two operand strips), rounded to whole rows and capped.  ``nshare``
+    workers share this device's memory.
     '''
-    free = free_bytes()
+    free = free_bytes() / nshare
     budget = max(0, free - max(512 * 1024**2, int(_RESERVE_FRAC * free)))
     fblk = max(_FFT_BLK_MIN, int(_FFT_BUDGET_FRAC * budget) // (_FFT_BYTES * ngrid))
     fblk = max(1, min(fblk, max_fft_batch(ngrid, mesh), layout.npair))
@@ -155,74 +160,101 @@ def _plan_strips(layout, ngrid, mesh, pair_blk=None):
     return blk, min(fblk, blk)
 
 
-def _block(moA, moB, w_half, mesh, out, layout, pair_blk, log):
-    '''Fill one physicist block ``out`` from the MO grids moA, moB (n, ngrid).'''
+def _strip(st, task, layout, mesh, out, blk, fblk):
+    '''Outer row strip [pa, pb): its potential once (fixed-shape FFT batches),
+    then one GEMM per inner strip at or below it, each tile scattered.'''
+    pa, pb = task
+    moA, moB, aidx, bidx = st['moA'], st['moB'], st['aidx'], st['bidx']
     ngrid = moA.shape[1]
-    blk, fblk = _plan_strips(layout, ngrid, mesh, pair_blk)
-    aidx, bidx = layout.index_arrays()
-    # fixed buffers for the whole block: one cuFFT plan, no pool churn
-    vR_buf = cp.empty((blk, ngrid))
-    rho_buf = cp.empty((blk, ngrid))
-    rho_f = cp.empty((fblk, ngrid))
     on_gpu = isinstance(out, cp.ndarray)
-    strips = layout.split(0, layout.nA, blk)
-    log.debug('ao2mo block %s: npair=%d pair_blk=%d fft_blk=%d strips=%d',
-              'compact' if layout.compact else 'full', layout.npair, blk, fblk, len(strips))
-    for pa, pb in strips:
-        P0, P1 = layout.pairs(pa, pb)
-        vR = vR_buf[:P1 - P0]
-        for f0 in range(P0, P1, fblk):
-            f1 = min(P1, f0 + fblk)
-            n = f1 - f0
-            if n < fblk:
-                rho_f[n:] = 0.0                     # keep the FFT batch shape fixed
-            codensity(moA, moB, aidx, bidx, f0, f1, out=rho_f[:n])
-            vR[f0 - P0:f1 - P0] = coulomb_potential(rho_f, mesh, w_half)[:n]
-        for ra, rb in layout.split(0, pb, blk):     # lower triangle of E
-            Q0, Q1 = layout.pairs(ra, rb)
-            rho_q = codensity(moA, moB, aidx, bidx, Q0, Q1, out=rho_buf[:Q1 - Q0])
-            tile = vR.dot(rho_q.T)
-            _write_tile(out, tile if on_gpu else tile.get(), layout, pa, pb, ra, rb)
+    P0, P1 = layout.pairs(pa, pb)
+    vR = st['vR'][:P1 - P0]
+    rho_f = st['rho_f']
+    for f0 in range(P0, P1, fblk):
+        f1 = min(P1, f0 + fblk)
+        n = f1 - f0
+        if n < fblk:
+            rho_f[n:] = 0.0                         # keep the FFT batch shape fixed
+        codensity(moA, moB, aidx, bidx, f0, f1, out=rho_f[:n])
+        vR[f0 - P0:f1 - P0] = coulomb_potential(rho_f, mesh, st['w_half'])[:n]
+    for ra, rb in layout.split(0, pb, blk):         # lower triangle of E
+        Q0, Q1 = layout.pairs(ra, rb)
+        rho_q = codensity(moA, moB, aidx, bidx, Q0, Q1, out=st['rho'][:Q1 - Q0])
+        tile = vR.dot(rho_q.T)
+        _write_tile(out, tile if on_gpu else tile.get(), layout, pa, pb, ra, rb)
+
+
+def _block(per_dev, sel, mesh, out, layout, pair_blk, devices, log):
+    '''Fill one physicist block ``out``; ``per_dev[rank]`` holds that device's
+    [moO, moV, w_half] and ``sel`` picks the two MO sets of the block.'''
+    ngrid = int(np.prod(mesh))
+    nshare = max(devices.count(d) for d in devices)
+    with cp.cuda.Device(devices[0]):
+        blk, fblk = _plan_strips(layout, ngrid, mesh, pair_blk, nshare)
+    tasks = layout.split(0, layout.nA, blk)[::-1]  # high rows own more tiles: first
+    log.debug('ao2mo block %s: npair=%d pair_blk=%d fft_blk=%d strips=%d on %d device(s)',
+              'compact' if layout.compact else 'full', layout.npair, blk, fblk,
+              len(tasks), len(devices))
+
+    def setup(rank):
+        grids = per_dev[rank]
+        aidx, bidx = layout.index_arrays()
+        # fixed buffers for the whole block: one cuFFT plan, no pool churn
+        return dict(moA=grids[sel[0]], moB=grids[sel[1]], w_half=grids[2], aidx=aidx, bidx=bidx,
+                    vR=cp.empty((blk, ngrid)), rho=cp.empty((blk, ngrid)),
+                    rho_f=cp.empty((fblk, ngrid)))
+
+    run(devices, setup, lambda rank, st, task: _strip(st, task, layout, mesh, out, blk, fblk),
+        tasks)
     return out
 
 
 def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, return_gpu=False,
-                     stage_host=None, verbose=None):
+                     stage_host=None, devices=None, verbose=None):
     '''Return vvvv, oovv, oooo (physicist, real) for the active orbitals cocc, cvir.
 
     Kwargs:
         pair_blk : force the GEMM strip width in pairs (default: from free memory).
         stage_host : None decides from ``gpu_mem.fits_resident``; True assembles
-            the finals in pinned host memory, False on the device.
+            the finals in pinned host memory, False on the device.  Several
+            devices always stage on the host.
         return_gpu : with device-resident finals, return CuPy arrays instead of
             NumPy copies.
+        devices : CUDA device ids to dispatch the pair strips over (default:
+            the current device).
     Returns:
         CuPy arrays when the finals are resident (and ``return_gpu``), otherwise
         NumPy arrays, pinned when host-staged.
     '''
     log = logger.new_logger(cell, verbose)
     t0 = log.init_timer()
-    moO, moV = mo_on_grid(cell, [cocc, cvir], mesh)
-    no, nv, ng = moO.shape[0], moV.shape[0], moO.shape[1]
-    w_half = half_kernel(gtools.get_coulG(cell, mesh=mesh) * (cell.vol / ng), mesh)
+    devices = default_devices(devices)
+    mesh = np.asarray(mesh, dtype=int)
+    ng = int(np.prod(mesh))
+    no, nv = np.asarray(cocc).shape[1], np.asarray(cvir).shape[1]
+    per_dev = each(devices, lambda rank: mo_on_grid(cell, [cocc, cvir], mesh)
+                   + [half_kernel(gtools.get_coulG(cell, mesh=mesh) * (cell.vol / ng), mesh)])
     if stage_host is None:
         stage_host = not fits_resident(no, nv, extra_bytes=(no + nv) * ng * 8)
-    log.info('GPU ao2mo: nocc=%d nvir=%d ngrid=%d eri=%.2f GB %s', no, nv, ng,
-             eri_bytes(no, nv) / 1e9, 'staged in pinned host memory' if stage_host else 'on device')
+    stage_host = stage_host or len(devices) > 1
+    log.info('GPU ao2mo: nocc=%d nvir=%d ngrid=%d eri=%.2f GB %s on %d device(s)', no, nv, ng,
+             eri_bytes(no, nv) / 1e9, 'staged in pinned host memory' if stage_host else 'on device',
+             len(devices))
     t0 = log.timer('ao2mo MO grids', *t0)
 
     def alloc(shape):
         return cupyx.empty_pinned(shape) if stage_host else cp.empty(shape)
 
     blocks = []
-    for name, (A, B) in (('vvvv', (moV, moV)), ('oooo', (moO, moO)), ('oovv', (moO, moV))):
-        layout = _PairLayout(A.shape[0], B.shape[0], compact=A is B)
-        out = alloc((A.shape[0], A.shape[0], B.shape[0], B.shape[0]))
-        blocks.append(_block(A, B, w_half, mesh, out, layout, pair_blk, log))
+    for name, sel in (('vvvv', (1, 1)), ('oooo', (0, 0)), ('oovv', (0, 1))):
+        nA, nB = per_dev[0][sel[0]].shape[0], per_dev[0][sel[1]].shape[0]
+        layout = _PairLayout(nA, nB, compact=sel[0] == sel[1])
+        out = alloc((nA, nA, nB, nB))
+        blocks.append(_block(per_dev, sel, mesh, out, layout, pair_blk, devices, log))
         t0 = log.timer(f'ao2mo {name}', *t0)
     vvvv, oooo, oovv = blocks
-    moO = moV = w_half = None
-    cp.get_default_memory_pool().free_all_blocks()
+    per_dev = None
+    each(devices, lambda rank: cp.get_default_memory_pool().free_all_blocks())
     if stage_host and fits_resident(no, nv):
         vvvv, oovv, oooo = (cp.asarray(x) for x in (vvvv, oovv, oooo))
         stage_host = False

@@ -17,7 +17,10 @@ When the three blocks do not fit the device (mode='streamed', the default when
 they exceed gpu_mem.RESIDENT_VRAM_FRAC of its memory) they stay on the host in
 pinned memory and are streamed once per MVP in contiguous row strips for the
 same GEMMs.  Blocks that are not already pinned (gpu_mem.is_pinned) are copied
-into pinned memory once at attach time.
+into pinned memory once at attach time.  With several devices whose combined
+memory holds the blocks (mode='split'), every device keeps a row range of each
+block resident and only the trial vectors move: the partial products are summed
+on the host.
 
 attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo) accepts numpy OR cupy blocks,
 sets up the use_eri dims, and overrides pprpa.contraction.
@@ -32,6 +35,7 @@ from pyscf.lib import logger
 from gpu4pyscf.lib.cupy_helper import pin_memory
 
 from lib_pprpa.gpu_mem import eri_bytes, fits_resident, free_bytes, is_pinned
+from lib_pprpa.gpu_multi import default_devices, each
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
 # Share of the free device memory one streamed row strip may occupy.
@@ -39,48 +43,84 @@ _STRIP_MEM_FRAC = 0.25
 
 
 def attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo, mode="auto", strip=None,
-                               pin=True, verbose=None):
+                               pin=True, devices=None, verbose=None):
     """Keep the active-space ERI on GPU (or stream it) and route Davidson MVP through cupy.
 
     Kwargs:
-        mode : 'auto', 'resident' or 'streamed'.  'auto' keeps the blocks on the
-            device when they are already cupy arrays or fit
-            gpu_mem.RESIDENT_VRAM_FRAC of its memory, and streams them otherwise.
+        mode : 'auto', 'resident', 'split' or 'streamed'.  'auto' keeps the
+            blocks on the device when they are already cupy arrays or fit
+            gpu_mem.RESIDENT_VRAM_FRAC of its memory, splits them over
+            ``devices`` when their combined memory holds them, and streams them
+            otherwise.
         strip : rows of a block uploaded per GEMM in streamed mode; default from
             the free device memory.
         pin : in streamed mode, copy host blocks that are not already pinned into
             pinned memory (one host copy per block); uploads then run at the
             link rate.  Blocks allocated with cupyx.empty_pinned are used as is.
+        devices : CUDA device ids for the split mode (default: the current device).
     """
     log = logger.new_logger(pprpa, logger.INFO if verbose is None else verbose)
     pprpa._use_eri = True
     nvir = pprpa.nvir
     nocc = pprpa.nocc
+    devices = default_devices(devices)
     if mode == "auto":
         on_device = all(isinstance(x, cp.ndarray) for x in (vvvv, oovv, oooo))
-        mode = "resident" if on_device or fits_resident(nocc, nvir) else "streamed"
-    if mode not in ("resident", "streamed"):
+        if on_device or fits_resident(nocc, nvir):
+            mode = "resident"
+        elif len(devices) > 1 and fits_resident(
+                nocc, nvir, total_bytes=len(devices) * _min_total_bytes(devices)):
+            mode = "split"
+        else:
+            mode = "streamed"
+    if mode not in ("resident", "split", "streamed"):
         raise ValueError(f"unknown mode {mode!r}")
     # reshape to matmul form once: (nv^2,nv^2),(no^2,no^2),(no^2,nv^2); on the
-    # device when resident, C-contiguous on the host when streamed
-    pprpa._gpu_vvvv = _flat(vvvv, nvir, nvir, mode, pin)
-    pprpa._gpu_oooo = _flat(oooo, nocc, nocc, mode, pin)
-    pprpa._gpu_oovv = _flat(oovv, nocc, nvir, mode, pin)
+    # device when resident, C-contiguous on the host when streamed or split
+    host = "streamed" if mode == "split" else mode
+    pprpa._gpu_vvvv = _flat(vvvv, nvir, nvir, host, pin and mode == "streamed")
+    pprpa._gpu_oooo = _flat(oooo, nocc, nocc, host, pin and mode == "streamed")
+    pprpa._gpu_oovv = _flat(oovv, nocc, nvir, host, pin and mode == "streamed")
     if mode == "streamed" and strip is None:
         n2 = max(nocc * nocc, nvir * nvir)
         strip = max(1, min(n2, int(_STRIP_MEM_FRAC * free_bytes()) // (8 * n2)))
     pprpa._gpu_eri_strip = strip if mode == "streamed" else None
+    pprpa._gpu_eri_split = _split_upload(pprpa, devices) if mode == "split" else None
     pprpa._gpu_mo_energy = cp.asarray(pprpa.mo_energy)
     # a tiny host array so kernel()'s `data_type = pprpa.vvvv.dtype` still works
     pprpa.vvvv = np.empty(0, dtype=np.float64)
     pprpa.oovv = None
     pprpa.oooo = None
     pprpa.contraction = lambda tri_vec: _gpu_eri_contraction(pprpa, tri_vec)
-    log.info("GPU ERI contraction: mode=%s strip=%s pinned=%s eri=%.2f GB nocc=%d nvir=%d",
+    log.info("GPU ERI contraction: mode=%s strip=%s pinned=%s devices=%s eri=%.2f GB nocc=%d nvir=%d",
              mode, pprpa._gpu_eri_strip,
-             mode == "streamed" and is_pinned(pprpa._gpu_vvvv),
+             mode == "streamed" and is_pinned(pprpa._gpu_vvvv), devices,
              eri_bytes(nocc, nvir) / 1e9, nocc, nvir)
     return pprpa
+
+
+def _min_total_bytes(devices):
+    def total(rank):
+        return cp.cuda.runtime.memGetInfo()[1]
+    return min(each(devices, total))
+
+
+def _split_upload(pprpa, devices):
+    """Rows [r0, r1) of every host block on each device (contiguous slices)."""
+    V, O, OV = pprpa._gpu_vvvv, pprpa._gpu_oooo, pprpa._gpu_oovv
+    n = len(devices)
+
+    def rows(total, rank):
+        return (total * rank) // n, (total * (rank + 1)) // n
+
+    def upload(rank):
+        v0, v1 = rows(V.shape[0], rank)
+        o0, o1 = rows(O.shape[0], rank)
+        return dict(v_rows=(v0, v1), o_rows=(o0, o1), V=cp.asarray(V[v0:v1]),
+                    O=cp.asarray(O[o0:o1]), OV=cp.asarray(OV[o0:o1]))
+    parts = each(devices, upload)
+    pprpa._gpu_vvvv = pprpa._gpu_oooo = pprpa._gpu_oovv = None
+    return devices, parts
 
 
 def release_gpu_eri(pprpa):
@@ -89,9 +129,14 @@ def release_gpu_eri(pprpa):
     The solver keeps its eigenvalues and eigenvectors; its contraction is no
     longer usable.
     """
+    split = pprpa.__dict__.pop("_gpu_eri_split", None)
     for attr in ("_gpu_vvvv", "_gpu_oooo", "_gpu_oovv", "_gpu_mo_energy",
                  "_gpu_eri_strip", "contraction"):
         pprpa.__dict__.pop(attr, None)
+    if split is not None:
+        devices, parts = split
+        parts.clear()
+        each(devices, lambda rank: cp.get_default_memory_pool().free_all_blocks())
     cp.get_default_memory_pool().free_all_blocks()
     cp.get_default_pinned_memory_pool().free_all_blocks()
 
@@ -106,6 +151,29 @@ def _flat(block, n0, n1, mode, pin):
     if pin and not is_pinned(block):
         block = pin_memory(block)
     return block
+
+
+def _split_products(zvvT, zooT, split):
+    """The four GEMMs with each device holding a row range of every block; the
+    partial products come back to the host and are summed (row strips of the
+    symmetric vvvv / oooo stand in for column strips, as in the streamed mode)."""
+    devices, parts = split
+    zvvT_h, zooT_h = zvvT.get(), zooT.get()
+    ntri = zvvT_h.shape[0]
+    no2 = zooT_h.shape[1]
+
+    def partial(rank):
+        p = parts[rank]
+        v0, v1 = p["v_rows"]
+        o0, o1 = p["o_rows"]
+        zvv, zoo = cp.asarray(zvvT_h), cp.asarray(zooT_h)
+        prod_vv = zvv[:, v0:v1] @ p["V"] + zoo[:, o0:o1] @ p["OV"]
+        prod_oo = cp.zeros((ntri, no2))
+        prod_oo += zoo[:, o0:o1] @ p["O"]
+        prod_oo[:, o0:o1] += zvv @ p["OV"].T
+        return prod_vv.get(), prod_oo.get()
+    out = each(devices, partial)
+    return cp.asarray(sum(o[0] for o in out)), cp.asarray(sum(o[1] for o in out))
 
 
 def _streamed_products(zvvT, zooT, V, O, OV, strip):
@@ -155,7 +223,9 @@ def _gpu_eri_contraction(pprpa, tri_vec):
     zooT = z_oo.transpose(0, 2, 1).reshape(ntri, no2)
     zvvT = z_vv.transpose(0, 2, 1).reshape(ntri, nv2)
 
-    if pprpa._gpu_eri_strip is None:
+    if pprpa._gpu_eri_split is not None:
+        prod_vv, prod_oo = _split_products(zvvT, zooT, pprpa._gpu_eri_split)
+    elif pprpa._gpu_eri_strip is None:
         prod_vv = zvvT @ pprpa._gpu_vvvv.T            # vvvv . z_vv
         prod_oo = zooT @ pprpa._gpu_oooo.T            # oooo . z_oo
         prod_vv = prod_vv + zooT @ pprpa._gpu_oovv    # + oovv^T . z_oo
