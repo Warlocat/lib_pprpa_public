@@ -21,7 +21,8 @@ into the packed rows of its outer strip on the device and the finished strip is
 copied to pinned host memory in one transfer, so with several ``devices`` the
 outer strips are simply dispatched over them (``gpu_multi``).  The strip width
 is chosen from the free device memory, whole MO rows at a time, and capped at
-``PAIR_BLK_CAP``.
+``PAIR_BLK_CAP``.  Tiles wide enough to gain run as emulated fp64 GEMMs
+(``gpu_emulation``) where the device supports it.
 '''
 
 import math
@@ -32,6 +33,7 @@ from pyscf.lib import logger
 from gpu4pyscf.pbc import tools as gtools
 
 from lib_pprpa.gpu_coulomb import codensity, coulomb_potential, half_kernel, mo_on_grid
+from lib_pprpa.gpu_emulation import emulation_pays, fp64_emulation
 from lib_pprpa.gpu_mem import (FFT_BATCH_MIN, empty_pinned, eri_bytes, free_bytes,
                                max_fft_batch, pack_offset, plan_budget)
 from lib_pprpa.gpu_multi import default_devices, each, run
@@ -138,7 +140,7 @@ def _plan_strips(layout, ngrid, mesh, pair_blk=None, nshare=1, extra=0):
     return blk, min(fblk, blk)
 
 
-def _strip(st, task, layout, mesh, emit, blk, fblk):
+def _strip(st, task, layout, mesh, emit, blk, fblk, emulate):
     '''Outer row strip [pa, pb): its potential once (fixed-shape FFT batches),
     then one GEMM per inner strip at or below it (the diagonal one in row
     sub-strips), each tile packed into the strip's rows on the device; the
@@ -165,11 +167,13 @@ def _strip(st, task, layout, mesh, emit, blk, fblk):
         for sa, sb in subs:
             S0, S1 = layout.pairs(sa, sb)
             ncol = (S1 if diag else Q1) - Q0
-            _pack_tile(buf, vR[S0 - P0:S1 - P0].dot(rho_q[:ncol].T), S0, Q0, base)
+            with fp64_emulation('eager' if emulate and emulation_pays(S1 - S0, ncol) else None):
+                tile = vR[S0 - P0:S1 - P0].dot(rho_q[:ncol].T)
+            _pack_tile(buf, tile, S0, Q0, base)
     emit(pa, pb, buf, base)
 
 
-def _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, log):
+def _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, emulate, log):
     '''Build block ``name`` strip by strip for ``sink``; ``per_dev[rank]`` holds that
     device's [moO, moV, w_half] and ``sel`` picks the two MO sets of the block.'''
     ngrid = int(np.prod(mesh))
@@ -180,9 +184,11 @@ def _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, log):
     emit = sink.prepare(name, tasks)
     nbuf = max(pack_offset(layout.pairs(a, b)[1]) - pack_offset(layout.pairs(a, b)[0])
                for a, b in tasks)
-    log.debug('ao2mo block %s: npair=%d pair_blk=%d fft_blk=%d strips=%d on %d device(s)',
-              'compact' if layout.compact else 'full', layout.npair, blk, fblk,
-              len(tasks), len(devices))
+    with cp.cuda.Device(devices[0]):
+        emulated = emulate and emulation_pays(blk, blk)
+    log.debug('ao2mo block %s: npair=%d pair_blk=%d fft_blk=%d strips=%d on %d device(s), '
+              'fp64 emulation %s', 'compact' if layout.compact else 'full', layout.npair, blk,
+              fblk, len(tasks), len(devices), 'on' if emulated else 'off')
 
     def setup(rank):
         grids = per_dev[rank]
@@ -193,7 +199,7 @@ def _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, log):
                     rho_f=cp.empty((fblk, ngrid)), buf=cp.empty(nbuf))
 
     run(devices, setup,
-        lambda rank, st, task: _strip(st, task, layout, mesh, emit, blk, fblk), tasks)
+        lambda rank, st, task: _strip(st, task, layout, mesh, emit, blk, fblk, emulate), tasks)
 
 
 class _GramSink:
@@ -211,13 +217,16 @@ class _GramSink:
         return lambda pa, pb, buf, base: buf.get(out=out[base:base + buf.size])
 
 
-def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, devices=None, verbose=None):
+def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, devices=None, emulate=True,
+                     verbose=None):
     '''Return the packed vvvv, oovv, oooo Gram matrices for the active orbitals cocc, cvir.
 
     Kwargs:
         pair_blk : force the GEMM strip width in pairs (default: from free memory).
         devices : CUDA device ids to dispatch the pair strips over (default:
             the current device).
+        emulate : run the tile GEMMs that gain from it as emulated fp64
+            (``gpu_emulation.emulation_pays``); False keeps every GEMM native.
     Returns:
         Three pinned NumPy arrays, the lower triangles of the pair Gram matrices
         (see the module docstring); ``pprpa_eri_gpu.attach_gpu_eri_contraction``
@@ -225,11 +234,11 @@ def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, devices=None, verbos
     '''
     no, nv = np.asarray(cocc).shape[1], np.asarray(cvir).shape[1]
     sink = _GramSink(no, nv)
-    gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, verbose)
+    gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, emulate, verbose)
     return sink.blocks['vvvv'], sink.blocks['oovv'], sink.blocks['oooo']
 
 
-def gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk=None, devices=None,
+def gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk=None, devices=None, emulate=True,
                      verbose=None):
     '''Build the vvvv, oooo and oovv Gram rows strip by strip and hand each finished
     strip to ``sink`` instead of storing the blocks.
@@ -256,7 +265,7 @@ def gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk=None, devices=None,
     for name, sel in (('vvvv', (1, 1)), ('oooo', (0, 0)), ('oovv', (0, 1))):
         nA, nB = per_dev[0][sel[0]].shape[0], per_dev[0][sel[1]].shape[0]
         layout = _PairLayout(nA, nB, compact=sel[0] == sel[1])
-        _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, log)
+        _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, emulate, log)
         t0 = log.timer(f'ao2mo {name}', *t0)
     per_dev = None
     each(devices, lambda rank: cp.get_default_memory_pool().free_all_blocks())

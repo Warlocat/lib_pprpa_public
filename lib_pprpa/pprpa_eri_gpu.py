@@ -104,14 +104,14 @@ class PairOperator:
 
 
 def gpu_ao2mo_pair_operator(cell, cocc, cvir, mesh, multi, rows=None, pair_blk=None,
-                            devices=None, verbose=None):
+                            devices=None, emulate=True, verbose=None):
     """The pair-space operator of multiplicity ``multi`` ('s' or 't') straight from the
     FFT ao2mo (``gpu_ao2mo.gpu_ao2mo_strips``): each Gram strip is converted on its
     device and only the operator strips reach the host.
 
     Kwargs:
         rows : first orbitals per operator strip; default up to _STRIP_ROWS pairs.
-        pair_blk, devices : as for ``gpu_ao2mo.gpu_ao2mo_blocks``.
+        pair_blk, devices, emulate : as for ``gpu_ao2mo.gpu_ao2mo_blocks``.
     Returns:
         A PairOperator in pinned host memory, for ``attach_gpu_eri_contraction``.
     """
@@ -119,7 +119,7 @@ def gpu_ao2mo_pair_operator(cell, cocc, cvir, mesh, multi, rows=None, pair_blk=N
         raise ValueError(f"multi must be 's' or 't', got {multi!r}")
     nocc, nvir = np.asarray(cocc).shape[1], np.asarray(cvir).shape[1]
     sink = _OperatorSink(nocc, nvir, multi, rows)
-    gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, verbose)
+    gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, emulate, verbose)
     return PairOperator(nocc, nvir, multi, sink.strips)
 
 
