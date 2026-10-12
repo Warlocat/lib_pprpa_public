@@ -26,12 +26,11 @@ import math
 
 import numpy as np
 import cupy as cp
-import cupyx
 from pyscf.lib import logger
 from gpu4pyscf.pbc import tools as gtools
 
 from lib_pprpa.gpu_coulomb import codensity, coulomb_potential, half_kernel, mo_on_grid
-from lib_pprpa.gpu_mem import eri_bytes, fits_resident, free_bytes, max_fft_batch
+from lib_pprpa.gpu_mem import empty_pinned, eri_bytes, fits_resident, free_bytes, max_fft_batch
 
 __all__ = ['gpu_ao2mo_blocks', 'PAIR_BLK_CAP']
 
@@ -213,7 +212,7 @@ def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, return_gpu=False,
     t0 = log.timer('ao2mo MO grids', *t0)
 
     def alloc(shape):
-        return cupyx.empty_pinned(shape) if stage_host else cp.empty(shape)
+        return empty_pinned(shape) if stage_host else cp.empty(shape)
 
     blocks = []
     for name, (A, B) in (('vvvv', (moV, moV)), ('oooo', (moO, moO)), ('oovv', (moO, moV))):

@@ -50,7 +50,7 @@ def attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo, mode="auto", strip=None,
             the free device memory.
         pin : in streamed mode, copy host blocks that are not already pinned into
             pinned memory (one host copy per block); uploads then run at the
-            link rate.  Blocks allocated with cupyx.empty_pinned are used as is.
+            link rate.  Blocks already pinned (gpu_mem.empty_pinned) are used as is.
     """
     log = logger.new_logger(pprpa, logger.INFO if verbose is None else verbose)
     pprpa._use_eri = True

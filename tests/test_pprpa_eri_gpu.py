@@ -40,6 +40,11 @@ def test_is_pinned():
     p = cupyx.empty_pinned((4, 6))
     assert is_pinned(p) and is_pinned(p.reshape(24)) and is_pinned(p[1:, :3])
     assert is_pinned(pin_memory(a))
+    from lib_pprpa.gpu_mem import empty_pinned
+    q = empty_pinned((3, 5))
+    assert q.shape == (3, 5) and q.dtype == np.float64
+    assert is_pinned(q) and is_pinned(q[1:, 2:])
+    assert empty_pinned(0).shape == (0,)
 
 
 def _random_eri(rng, nocc, nvir):

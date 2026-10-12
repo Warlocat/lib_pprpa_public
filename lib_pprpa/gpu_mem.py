@@ -8,10 +8,11 @@ to the device runs at the link rate instead of through the driver's bounce
 buffer (about 6x on a B200).
 '''
 
+import numpy as np
 import cupy as cp
 
-__all__ = ['RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes', 'is_pinned',
-           'needs_bluestein', 'max_fft_batch']
+__all__ = ['RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes', 'empty_pinned',
+           'is_pinned', 'needs_bluestein', 'max_fft_batch']
 
 # Leaves room for the trial vectors, the SCF arrays and the gradient intermediates.
 RESIDENT_VRAM_FRAC = 0.75
@@ -56,8 +57,24 @@ def fits_resident(nocc, nvir, extra_bytes=0, total_bytes=None, frac=RESIDENT_VRA
     return eri_bytes(nocc, nvir) + int(extra_bytes) <= int(frac * int(total_bytes))
 
 
+def empty_pinned(shape, dtype=np.float64):
+    '''Page-locked NumPy array of exactly its size, freed with the array.
+
+    ``cupyx.empty_pinned`` draws from cupy's pinned pool, which rounds every block
+    up to a power of two, all of it resident (a 5.9 GB request holds 8.6 GB); this
+    calls cudaHostAlloc for the bytes asked for.
+    '''
+    shape = (int(shape),) if np.isscalar(shape) else tuple(int(n) for n in shape)
+    dtype = np.dtype(dtype)
+    nbytes = int(np.prod(shape)) * dtype.itemsize
+    if nbytes == 0:
+        return np.empty(shape, dtype)
+    mem = cp.cuda.PinnedMemoryPointer(cp.cuda.PinnedMemory(nbytes), 0)
+    return np.ndarray(shape, dtype, buffer=mem)
+
+
 def is_pinned(array):
-    '''True if a NumPy array lives in pinned host memory (``cupyx.empty_pinned``,
+    '''True if a NumPy array lives in pinned host memory (``empty_pinned``,
     ``gpu4pyscf.lib.cupy_helper.pin_memory`` or any view of them).'''
     attrs = cp.cuda.runtime.pointerGetAttributes(array.ctypes.data)
     return attrs.type == cp.cuda.runtime.memoryTypeHost
