@@ -179,6 +179,39 @@ def test_auto_mode_follows_free_memory(monkeypatch):
 
 @needs_gpu
 @pytest.mark.parametrize("multi", ("s", "t"))
+@pytest.mark.parametrize("pair_blk, devices", ((None, None), (3, None), (30, [0, 0])))
+def test_fused_ao2mo_operator_matches_cpu(multi, pair_blk, devices):
+    """The operator built inside the FFT ao2mo gives the CPU products on pyscf's
+    integrals, placed in every mode, and only for its own multiplicity."""
+    from test_gpu_ao2mo import _diamond
+    from lib_pprpa.pprpa_davidson import _pprpa_contraction
+    from lib_pprpa.pprpa_eri_gpu import (attach_gpu_eri_contraction, gpu_ao2mo_pair_operator,
+                                            release_gpu_eri)
+    cell, cocc, cvir, ref = _diamond("gth-dzv")
+    nocc = cocc.shape[1]
+    rng = np.random.default_rng(6)
+    moe = np.sort(rng.standard_normal(nocc + cvir.shape[1]))
+    cpu = _solver(nocc, moe, multi, eri=ref)
+    tv = rng.standard_normal((5, cpu.full_dim))
+    expect = _pprpa_contraction(cpu, tv)
+    op = gpu_ao2mo_pair_operator(cell, cocc, cvir, cell.mesh, multi, pair_blk=pair_blk,
+                                 devices=devices)
+    assert op.multi == multi and all(isinstance(s[3], np.ndarray) for s in op.strips)
+    for mode, devs in (("resident", None), ("streamed", None), ("split", [0, 0])):
+        gpu = _solver(nocc, moe, multi)
+        attach_gpu_eri_contraction(gpu, op, mode=mode, devices=devs)
+        # ao2mo sums the 8000-point grid in a different order than pyscf (~5e-11 per element)
+        np.testing.assert_allclose(gpu.contraction(tv), expect, rtol=1e-9, atol=1e-9)
+        release_gpu_eri(gpu)
+    gpu = _solver(nocc, moe, "t" if multi == "s" else "s")
+    attach_gpu_eri_contraction(gpu, op)
+    with pytest.raises(ValueError):
+        gpu.contraction(np.zeros((1, gpu.full_dim)))
+    release_gpu_eri(gpu)
+
+
+@needs_gpu
+@pytest.mark.parametrize("multi", ("s", "t"))
 def test_davidson_energies_match_cpu(multi):
     """Full Davidson solve on a diamond cell: streamed pair operator vs the CPU use_eri path."""
     from pyscf.pbc import dft, gto

@@ -36,7 +36,7 @@ from lib_pprpa.gpu_mem import (FFT_BATCH_MIN, empty_pinned, eri_bytes, free_byte
                                max_fft_batch, pack_offset, plan_budget)
 from lib_pprpa.gpu_multi import default_devices, each, run
 
-__all__ = ['gpu_ao2mo_blocks', 'PAIR_BLK_CAP']
+__all__ = ['gpu_ao2mo_blocks', 'gpu_ao2mo_strips', 'PAIR_BLK_CAP']
 
 # Widest strip the planner chooses.  The fp64 tile GEMM on a B200 peaks near
 # b = 4800-5000 pairs and loses ~20% at 6000-7600, where the two operand strips
@@ -114,15 +114,16 @@ def _pack_tile(buf, tile, P0, Q0, base):
     _PACK_TILE(tile, tile.shape[1], P0, Q0, base, buf, size=tile.size)
 
 
-def _plan_strips(layout, ngrid, mesh, pair_blk=None, nshare=1):
+def _plan_strips(layout, ngrid, mesh, pair_blk=None, nshare=1, extra=0):
     '''(pair_blk, fft_blk): GEMM strip width and FFT sub-batch from free memory.
 
     The FFT sub-batch is gpu_mem.FFT_BATCH_MIN transforms, where cuFFT saturates,
     within the cuFFT plan cap; the strip then solves 8 b^2 + (16 ngrid + 8 npair) b <= rest (a
     b x b tile, the two operand strips and the packed rows of the strip),
-    rounded to whole rows and capped.  ``nshare`` workers share this device's memory.
+    rounded to whole rows and capped.  ``nshare`` workers share this device's memory,
+    each keeping ``extra`` bytes for the strip's consumer.
     '''
-    free = free_bytes() / nshare
+    free = free_bytes() / nshare - extra
     budget = plan_budget(free)
     fblk = max(1, min(FFT_BATCH_MIN, max_fft_batch(ngrid), layout.npair))
     if pair_blk is None:
@@ -137,11 +138,11 @@ def _plan_strips(layout, ngrid, mesh, pair_blk=None, nshare=1):
     return blk, min(fblk, blk)
 
 
-def _strip(st, task, layout, mesh, out, blk, fblk):
+def _strip(st, task, layout, mesh, emit, blk, fblk):
     '''Outer row strip [pa, pb): its potential once (fixed-shape FFT batches),
     then one GEMM per inner strip at or below it (the diagonal one in row
     sub-strips), each tile packed into the strip's rows on the device; the
-    finished rows go to the host in one copy.'''
+    finished rows go to ``emit``.'''
     pa, pb = task
     moA, moB, aidx, bidx = st['moA'], st['moB'], st['aidx'], st['bidx']
     P0, P1 = layout.pairs(pa, pb)
@@ -165,17 +166,18 @@ def _strip(st, task, layout, mesh, out, blk, fblk):
             S0, S1 = layout.pairs(sa, sb)
             ncol = (S1 if diag else Q1) - Q0
             _pack_tile(buf, vR[S0 - P0:S1 - P0].dot(rho_q[:ncol].T), S0, Q0, base)
-    buf.get(out=out[base:base + buf.size])
+    emit(pa, pb, buf, base)
 
 
-def _block(per_dev, sel, mesh, out, layout, pair_blk, devices, log):
-    '''Fill the packed block ``out``; ``per_dev[rank]`` holds that device's
-    [moO, moV, w_half] and ``sel`` picks the two MO sets of the block.'''
+def _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, log):
+    '''Build block ``name`` strip by strip for ``sink``; ``per_dev[rank]`` holds that
+    device's [moO, moV, w_half] and ``sel`` picks the two MO sets of the block.'''
     ngrid = int(np.prod(mesh))
     nshare = max(devices.count(d) for d in devices)
     with cp.cuda.Device(devices[0]):
-        blk, fblk = _plan_strips(layout, ngrid, mesh, pair_blk, nshare)
+        blk, fblk = _plan_strips(layout, ngrid, mesh, pair_blk, nshare, sink.device_bytes(name))
     tasks = layout.split(0, layout.nA, blk)[::-1]  # high rows own more tiles: first
+    emit = sink.prepare(name, tasks)
     nbuf = max(pack_offset(layout.pairs(a, b)[1]) - pack_offset(layout.pairs(a, b)[0])
                for a, b in tasks)
     log.debug('ao2mo block %s: npair=%d pair_blk=%d fft_blk=%d strips=%d on %d device(s)',
@@ -191,8 +193,22 @@ def _block(per_dev, sel, mesh, out, layout, pair_blk, devices, log):
                     rho_f=cp.empty((fblk, ngrid)), buf=cp.empty(nbuf))
 
     run(devices, setup,
-        lambda rank, st, task: _strip(st, task, layout, mesh, out, blk, fblk), tasks)
-    return out
+        lambda rank, st, task: _strip(st, task, layout, mesh, emit, blk, fblk), tasks)
+
+
+class _GramSink:
+    '''Copies every strip into its pinned packed block (``gpu_ao2mo_blocks``).'''
+
+    def __init__(self, nocc, nvir):
+        self.npair = {'vvvv': pack_offset(nvir), 'oooo': pack_offset(nocc), 'oovv': nocc * nvir}
+        self.blocks = {}
+
+    def device_bytes(self, name):
+        return 0
+
+    def prepare(self, name, tasks):
+        out = self.blocks[name] = empty_pinned(pack_offset(self.npair[name]))
+        return lambda pa, pb, buf, base: buf.get(out=out[base:base + buf.size])
 
 
 def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, devices=None, verbose=None):
@@ -207,6 +223,24 @@ def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, devices=None, verbos
         (see the module docstring); ``pprpa_eri_gpu.attach_gpu_eri_contraction``
         takes them as they are.
     '''
+    no, nv = np.asarray(cocc).shape[1], np.asarray(cvir).shape[1]
+    sink = _GramSink(no, nv)
+    gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, verbose)
+    return sink.blocks['vvvv'], sink.blocks['oovv'], sink.blocks['oooo']
+
+
+def gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk=None, devices=None,
+                     verbose=None):
+    '''Build the vvvv, oooo and oovv Gram rows strip by strip and hand each finished
+    strip to ``sink`` instead of storing the blocks.
+
+    ``sink.device_bytes(name)`` is the device memory the sink needs per worker while
+    block ``name`` runs (kept out of the strip plan); ``sink.prepare(name, tasks)`` is
+    called on the host with the block's strips [(pa, pb)] of first orbitals (rows of
+    the pair layout) and returns ``emit(pa, pb, buf, base)``, which a worker calls on
+    its device with the strip's packed Gram rows ``buf`` starting at packed offset
+    ``base``.  Kwargs as for ``gpu_ao2mo_blocks``.
+    '''
     log = logger.new_logger(cell, verbose)
     t0 = log.init_timer()
     devices = default_devices(devices)
@@ -219,14 +253,10 @@ def gpu_ao2mo_blocks(cell, cocc, cvir, mesh, pair_blk=None, devices=None, verbos
              no, nv, ng, eri_bytes(no, nv) / 1e9, len(devices))
     t0 = log.timer('ao2mo MO grids', *t0)
 
-    blocks = []
     for name, sel in (('vvvv', (1, 1)), ('oooo', (0, 0)), ('oovv', (0, 1))):
         nA, nB = per_dev[0][sel[0]].shape[0], per_dev[0][sel[1]].shape[0]
         layout = _PairLayout(nA, nB, compact=sel[0] == sel[1])
-        out = empty_pinned(pack_offset(layout.npair))
-        blocks.append(_block(per_dev, sel, mesh, out, layout, pair_blk, devices, log))
+        _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, log)
         t0 = log.timer(f'ao2mo {name}', *t0)
-    vvvv, oooo, oovv = blocks
     per_dev = None
     each(devices, lambda rank: cp.get_default_memory_pool().free_all_blocks())
-    return vvvv, oovv, oooo

@@ -15,19 +15,23 @@ strips, so a product is two GEMMs per strip, Y[R] += S X[:R1] and Y[:R1] += S^T 
 (for B: Y_oo[R] += S X_vv and Y_vv += S^T X_oo[R]), with no gather and no zeros.
 Both terms of a row whose first orbital is p sit in Gram rows of first orbital
 max(p, r) with r <= p, so a strip over the first orbitals [pa, pb) is converted on
-the device from the Gram rows of those orbitals alone.  M takes about 2/3 of the
-Gram blocks (B is half of oovv).  ``attach_gpu_eri_contraction`` converts the Gram
-blocks at the first product, for the multiplicity the solver then has, and drops them.
+the device from the Gram rows of those orbitals alone.  ``gpu_ao2mo_pair_operator``
+does that to every strip of the FFT ao2mo as it is built, so the Gram blocks are
+never stored and only M (about 2/3 of them; B is half of oovv) reaches the host.
+``attach_gpu_eri_contraction`` takes that operator, or Gram blocks, which it converts
+at the first product for the multiplicity the solver then has.
 """
 import numpy as np
 import cupy as cp
 from cupy import cublas
 from pyscf.lib import logger
 
+from lib_pprpa.gpu_ao2mo import gpu_ao2mo_strips
 from lib_pprpa.gpu_mem import empty_pinned, free_bytes, pack_offset, plan_budget
 from lib_pprpa.gpu_multi import default_devices, each
 
-__all__ = ['attach_gpu_eri_contraction', 'pack_eri', 'pair_operator_bytes', 'release_gpu_eri']
+__all__ = ['PairOperator', 'attach_gpu_eri_contraction', 'gpu_ao2mo_pair_operator',
+           'pack_eri', 'pair_operator_bytes', 'release_gpu_eri']
 
 # Pair rows per strip.  The diagonal block of a strip is stored in full, which adds
 # rows / npair to the storage of a block; the GEMMs are bandwidth-bound at any width.
@@ -87,30 +91,74 @@ def pair_operator_bytes(nocc, nvir, multi):
     return 8 * (pack_offset(noo) + pack_offset(nvv) + noo * nvv)
 
 
-def attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo, mode="auto", rows=None, devices=None,
-                               verbose=None):
+class PairOperator:
+    """The pair-space operator of one multiplicity as pinned host strips
+    [(kind, R0, R1, S)], kind 'oo', 'vv' or 'ov' (B); see the module docstring."""
+
+    def __init__(self, nocc, nvir, multi, strips):
+        self.nocc, self.nvir, self.multi, self.strips = int(nocc), int(nvir), multi, strips
+
+    @property
+    def nbytes(self):
+        return sum(strip[3].nbytes for strip in self.strips)
+
+
+def gpu_ao2mo_pair_operator(cell, cocc, cvir, mesh, multi, rows=None, pair_blk=None,
+                            devices=None, verbose=None):
+    """The pair-space operator of multiplicity ``multi`` ('s' or 't') straight from the
+    FFT ao2mo (``gpu_ao2mo.gpu_ao2mo_strips``): each Gram strip is converted on its
+    device and only the operator strips reach the host.
+
+    Kwargs:
+        rows : first orbitals per operator strip; default up to _STRIP_ROWS pairs.
+        pair_blk, devices : as for ``gpu_ao2mo.gpu_ao2mo_blocks``.
+    Returns:
+        A PairOperator in pinned host memory, for ``attach_gpu_eri_contraction``.
+    """
+    if multi not in ("s", "t"):
+        raise ValueError(f"multi must be 's' or 't', got {multi!r}")
+    nocc, nvir = np.asarray(cocc).shape[1], np.asarray(cvir).shape[1]
+    sink = _OperatorSink(nocc, nvir, multi, rows)
+    gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, verbose)
+    return PairOperator(nocc, nvir, multi, sink.strips)
+
+
+def attach_gpu_eri_contraction(pprpa, *eri, mode="auto", rows=None, devices=None, verbose=None):
     """Route the use_eri Davidson products through the pair-space operator on the GPU.
 
     Args:
-        vvvv, oovv, oooo : the packed Gram triangles of ``gpu_ao2mo_blocks`` (NumPy or
-            CuPy; ``pack_eri`` converts physicist tensors), converted at the first
-            product for the solver's multiplicity and then dropped.
+        eri : a PairOperator (``gpu_ao2mo_pair_operator``), or the packed Gram
+            triangles vvvv, oovv, oooo of ``gpu_ao2mo_blocks`` (NumPy or CuPy;
+            ``pack_eri`` converts physicist tensors), which are converted
+            at the first product for the solver's multiplicity and then dropped.
     Kwargs:
         mode : 'auto', 'resident', 'split' or 'streamed'.  'auto' keeps the strips on
             the device when they fit its free memory beside one more strip (the
             Gram slice being converted) and the product arrays of the largest trial
             block (max_vec + nroot vectors), divides them over ``devices`` when an
             equal share plus one strip fits each, and streams them otherwise.
-        rows : first orbitals per strip; default up to _STRIP_ROWS pairs.
+        rows : first orbitals per strip when converting Gram blocks; default up to
+            _STRIP_ROWS pairs.
         devices : CUDA device ids for the split mode (default: the current device).
     """
     log = logger.new_logger(pprpa, logger.INFO if verbose is None else verbose)
     nocc, nvir = pprpa.nocc, pprpa.nvir
-    blocks = _check_packed(vvvv, oovv, oooo, nocc, nvir)
-    need = pair_operator_bytes(nocc, nvir, "s")
+    if len(eri) == 1 and isinstance(eri[0], PairOperator):
+        pre, blocks, multi, need = eri[0], None, eri[0].multi, eri[0].nbytes
+        if (pre.nocc, pre.nvir) != (nocc, nvir):
+            raise ValueError(f"operator for nocc={pre.nocc} nvir={pre.nvir}, solver has "
+                             f"nocc={nocc} nvir={nvir}")
+    elif len(eri) == 3:
+        pre, blocks, multi = None, _check_packed(*eri, nocc, nvir), None
+        need = pair_operator_bytes(nocc, nvir, "s")
+    else:
+        raise TypeError("expected a PairOperator or the vvvv, oovv, oooo Gram blocks")
     devices = default_devices(devices)
     if mode == "auto":
-        strip = max(s[-1] for s in _strips(nocc, nvir, "s", rows))
+        if pre is not None:
+            strip = max(S.nbytes for *_, S in pre.strips)
+        else:
+            strip = max(s[-1] for s in _strips(nocc, nvir, "s", rows))
         temps = 8 * _PRODUCT_ARRAYS * (pprpa.max_vec + pprpa.nroot) * (
             _pair_offset(nocc, "s") + _pair_offset(nvir, "s"))
         free = each(devices, lambda rank: free_bytes())
@@ -125,15 +173,16 @@ def attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo, mode="auto", rows=None, 
     if mode not in ("resident", "split", "streamed"):
         raise ValueError(f"unknown mode {mode!r}")
     pprpa._use_eri = True
-    pprpa._gpu_eri = dict(blocks=blocks, mode=mode, rows=rows, devices=devices, multi=None,
-                          strips=None, log=log)
+    pprpa._gpu_eri = dict(blocks=blocks, prebuilt=pre, mode=mode, rows=rows, devices=devices,
+                          multi=multi, strips=None, log=log)
     # a tiny host array so kernel()'s `data_type = pprpa.vvvv.dtype` still works
     pprpa.vvvv = np.empty(0, dtype=np.float64)
     pprpa.oovv = None
     pprpa.oooo = None
     pprpa.contraction = lambda tri_vec: _contraction(pprpa, tri_vec)
-    log.info("GPU pair operator: mode=%s devices=%s operator=%.2f GB (singlet) nocc=%d nvir=%d",
-             mode, devices, need / 1e9, nocc, nvir)
+    log.info("GPU pair operator: mode=%s devices=%s operator=%.2f GB%s nocc=%d nvir=%d",
+             mode, devices, need / 1e9, f" ({multi})" if pre else " (singlet, from Gram)",
+             nocc, nvir)
     return pprpa
 
 
@@ -230,6 +279,52 @@ def _convert_strip(kind, R0, R1, E, base, pairs, nvir, sgn):
     return S
 
 
+class _OperatorSink:
+    """Converts each Gram strip of ``gpu_ao2mo_strips`` into the operator strips over
+    the same first orbitals and keeps those in pinned host memory."""
+    _KIND = {"vvvv": "vv", "oooo": "oo", "oovv": "ov"}
+
+    def __init__(self, nocc, nvir, multi, rows):
+        self.nocc, self.nvir, self.multi, self.rows = nocc, nvir, multi, rows
+        self.strips = []
+        self._pairs = {}
+
+    def _ncol(self, kind, R1):
+        return _pair_offset(self.nvir, self.multi) if kind == "ov" else R1
+
+    def device_bytes(self, name):
+        """One converted strip (at least one orbital of pairs) and the pair index arrays."""
+        kind = self._KIND[name]
+        n = self.nvir if kind == "vv" else self.nocc
+        npair = _pair_offset(self.nocc, self.multi) + _pair_offset(self.nvir, self.multi)
+        return 8 * max(_STRIP_ROWS, n) * self._ncol(kind, _pair_offset(n, self.multi)) + 8 * npair
+
+    def prepare(self, name, tasks):
+        kind = self._KIND[name]
+        n = self.nvir if kind == "vv" else self.nocc
+        sgn = 1.0 if self.multi == "s" else -1.0
+        plan = {}
+        for pa, pb in tasks:
+            plan[pa, pb] = []
+            for _, _, R0, R1 in _row_strips(n, self.multi, self.rows, pa, pb):
+                host = empty_pinned((R1 - R0, self._ncol(kind, R1)))
+                self.strips.append((kind, R0, R1, host))
+                plan[pa, pb].append((R0, R1, host))
+
+        def emit(pa, pb, buf, base):
+            pairs = self._device_pairs()
+            for R0, R1, host in plan[pa, pb]:
+                _convert_strip(kind, R0, R1, buf, base, pairs, self.nvir, sgn).get(out=host)
+        return emit
+
+    def _device_pairs(self):
+        dev = cp.cuda.Device().id
+        if dev not in self._pairs:
+            self._pairs[dev] = {"oo": _pairs(self.nocc, self.multi),
+                                "vv": _pairs(self.nvir, self.multi)}
+        return self._pairs[dev]
+
+
 def _convert(blocks, plan, nocc, nvir, multi, host):
     """Build the strips of ``plan`` on the current device from uploaded Gram slices;
     pinned host copies if ``host``."""
@@ -264,20 +359,32 @@ def _assign(sizes, n):
 
 
 def _build(op, nocc, nvir):
-    mode, devices, multi, blocks = op["mode"], op["devices"], op["multi"], op["blocks"]
+    mode, devices, multi, pre = op["mode"], op["devices"], op["multi"], op["prebuilt"]
     t0 = op["log"].init_timer()
-    plan = _strips(nocc, nvir, multi, op["rows"])
-    if mode == "split":
-        parts = _assign([s[-1] for s in plan], len(devices))
-        strips = each(devices, lambda rank: _convert(
-            blocks, [plan[i] for i in parts[rank]], nocc, nvir, multi, False))
+    if pre is not None:
+        items = pre.strips
+        if mode == "streamed":
+            strips = items
+        elif mode == "resident":
+            strips = [(k, R0, R1, cp.asarray(S)) for k, R0, R1, S in items]
+        else:
+            parts = _assign([S.nbytes for *_, S in items], len(devices))
+            strips = each(devices, lambda rank: [(k, R0, R1, cp.asarray(S)) for k, R0, R1, S
+                                                 in (items[i] for i in parts[rank])])
     else:
-        strips = _convert(blocks, plan, nocc, nvir, multi, mode == "streamed")
-    op.update(strips=strips, blocks=None)
+        blocks = op["blocks"]
+        plan = _strips(nocc, nvir, multi, op["rows"])
+        if mode == "split":
+            parts = _assign([s[-1] for s in plan], len(devices))
+            strips = each(devices, lambda rank: _convert(
+                blocks, [plan[i] for i in parts[rank]], nocc, nvir, multi, False))
+        else:
+            strips = _convert(blocks, plan, nocc, nvir, multi, mode == "streamed")
+    op.update(strips=strips, blocks=None, prebuilt=None)
     cp.get_default_memory_pool().free_all_blocks()
     cp.get_default_pinned_memory_pool().free_all_blocks()   # dropped host blocks, if unreferenced
     flat = sum(strips, []) if mode == "split" else strips
-    op["log"].timer("pair operator build", *t0)
+    op["log"].timer("pair operator placement" if pre is not None else "pair operator build", *t0)
     op["log"].info("GPU pair operator (%s, %s): %d strips, %.2f GB", multi, mode, len(flat),
                    sum(strip[3].nbytes for strip in flat) / 1e9)
 
