@@ -14,7 +14,9 @@ operator from these rows, so the 8x (2x for oovv) larger physicist tensors are n
 
 E is formed in row strips of the pair index: the potential of an outer strip is
 built once (FFT sub-batches into a fixed buffer) and contracted, one GEMM per
-strip pair, against every inner strip at or below it.  Each tile is scattered
+strip pair, against every inner strip at or below it; the diagonal tile runs in
+``_DIAG_SPLIT`` row sub-strips, each only up to its own last column, so little
+of its upper triangle is computed and discarded.  Each tile is scattered
 into the packed rows of its outer strip on the device and the finished strip is
 copied to pinned host memory in one transfer, so with several ``devices`` the
 outer strips are simply dispatched over them (``gpu_multi``).  The strip width
@@ -45,6 +47,9 @@ PAIR_BLK_CAP = 5000
 # GEMM operand strips (vR and the inner codensity).
 _FFT_BYTES = 56
 _GEMM_BYTES = 16
+# Row sub-strips of the diagonal tile: k of them compute (k + 1) / 2k of it.  Beyond
+# 4 the saving is under 1% of the block's GEMM work and the GEMMs get thin.
+_DIAG_SPLIT = 4
 
 
 class _PairLayout:
@@ -134,8 +139,9 @@ def _plan_strips(layout, ngrid, mesh, pair_blk=None, nshare=1):
 
 def _strip(st, task, layout, mesh, out, blk, fblk):
     '''Outer row strip [pa, pb): its potential once (fixed-shape FFT batches),
-    then one GEMM per inner strip at or below it, each tile packed into the
-    strip's rows on the device; the finished rows go to the host in one copy.'''
+    then one GEMM per inner strip at or below it (the diagonal one in row
+    sub-strips), each tile packed into the strip's rows on the device; the
+    finished rows go to the host in one copy.'''
     pa, pb = task
     moA, moB, aidx, bidx = st['moA'], st['moB'], st['aidx'], st['bidx']
     P0, P1 = layout.pairs(pa, pb)
@@ -153,7 +159,12 @@ def _strip(st, task, layout, mesh, out, blk, fblk):
     for ra, rb in layout.split(0, pb, blk):         # lower triangle of E
         Q0, Q1 = layout.pairs(ra, rb)
         rho_q = codensity(moA, moB, aidx, bidx, Q0, Q1, out=st['rho'][:Q1 - Q0])
-        _pack_tile(buf, vR.dot(rho_q.T), P0, Q0, base)
+        diag = ra == pa
+        subs = layout.split(pa, pb, -(-(P1 - P0) // _DIAG_SPLIT)) if diag else [(pa, pb)]
+        for sa, sb in subs:
+            S0, S1 = layout.pairs(sa, sb)
+            ncol = (S1 if diag else Q1) - Q0
+            _pack_tile(buf, vR[S0 - P0:S1 - P0].dot(rho_q[:ncol].T), S0, Q0, base)
     buf.get(out=out[base:base + buf.size])
 
 

@@ -117,7 +117,7 @@ def test_coulomb_potential_matches_complex_chain():
     assert float(cp.abs(got - ref).max()) < 1e-12 * float(cp.abs(ref).max())
 
 
-@pytest.mark.parametrize("pair_blk", (None, 3))
+@pytest.mark.parametrize("pair_blk", (None, 3, 30))
 def test_ao2mo_blocks_match_pyscf(pair_blk):
     """The packed blocks equal the packed pyscf integrals and come back pinned."""
     import cupy as cp
