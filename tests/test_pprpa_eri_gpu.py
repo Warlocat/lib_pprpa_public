@@ -1,9 +1,10 @@
-"""GPU Davidson ERI contraction against the CPU routine, resident and streamed."""
+"""GPU Davidson products from the pair-space operator against the CPU use_eri routine,
+resident, streamed and split; Gram-block packing and pinned host memory."""
 
 import numpy as np
 import pytest
 
-from lib_pprpa.gpu_mem import eri_bytes, fits_resident
+from lib_pprpa.gpu_mem import eri_bytes
 
 
 def _gpu4pyscf_available():
@@ -19,15 +20,9 @@ needs_gpu = pytest.mark.skipif(
     not _gpu4pyscf_available(), reason="GPU4PySCF CUDA device is unavailable")
 
 
-def test_eri_bytes_and_fits_resident():
-    assert eri_bytes(300, 300) == 3 * 300**4 * 8
-    assert eri_bytes(128, 124) == (124**4 + 128**4 + 128**2 * 124**2) * 8
-    b200 = 183359 * 1024**2
-    assert not fits_resident(300, 300, total_bytes=b200)
-    assert fits_resident(128, 124, total_bytes=b200)
-    tiny = eri_bytes(8, 8)
-    assert fits_resident(8, 8, total_bytes=int(tiny / 0.75) + 8)
-    assert not fits_resident(8, 8, total_bytes=int(tiny / 0.75) - 8)
+def test_eri_bytes():
+    assert eri_bytes(300, 300) == 8 * (2 * 45150 * 45151 // 2 + 90000 * 90001 // 2)
+    assert eri_bytes(8, 8) == 8 * (2 * 36 * 37 // 2 + 64 * 65 // 2)
 
 
 @needs_gpu
@@ -47,15 +42,16 @@ def test_is_pinned():
     assert empty_pinned(0).shape == (0,)
 
 
-def _random_eri(rng, nocc, nvir):
-    # <ab|cd> = <cd|ab> for real orbitals: the flattened vvvv / oooo are symmetric
-    nv2, no2 = nvir * nvir, nocc * nocc
-    V = rng.standard_normal((nv2, nv2))
-    O = rng.standard_normal((no2, no2))
-    vvvv = ((V + V.T) * 0.5).reshape(nvir, nvir, nvir, nvir)
-    oooo = ((O + O.T) * 0.5).reshape(nocc, nocc, nocc, nocc)
-    oovv = rng.standard_normal((nocc, nocc, nvir, nvir))
-    return vvvv, oovv, oooo
+def _random_eri(rng, nocc, nvir, ng=40):
+    """Physicist blocks of random real orbitals on a grid: every ERI symmetry holds."""
+    phi = rng.standard_normal((nocc + nvir, ng))
+    W = rng.standard_normal((ng, ng)) / ng
+    W = W + W.T
+    rho = np.einsum("pg,qg->pqg", phi, phi)
+    phys = np.einsum("pqg,gh,rsh->pqrs", rho, W, rho).transpose(0, 2, 1, 3)   # <pr|qs>
+    return (np.ascontiguousarray(phys[nocc:, nocc:, nocc:, nocc:]),
+            np.ascontiguousarray(phys[:nocc, :nocc, nocc:, nocc:]),
+            np.ascontiguousarray(phys[:nocc, :nocc, :nocc, :nocc]))
 
 
 def _solver(nocc, mo_energy, multi, eri=None):
@@ -71,11 +67,54 @@ def _solver(nocc, mo_energy, multi, eri=None):
 
 
 @needs_gpu
+def test_pack_eri():
+    """pack_eri stores (pq|rs) for Q <= P at P(P+1)/2 + Q, on NumPy and CuPy input."""
+    import cupy as cp
+    from lib_pprpa.gpu_mem import pack_offset
+    from lib_pprpa.pprpa_eri_gpu import pack_eri
+    rng = np.random.default_rng(1)
+    nocc, nvir = 3, 4
+    vvvv, oovv, oooo = _random_eri(rng, nocc, nvir)
+    pv, pov, po = pack_eri(vvvv, oovv, oooo)
+    assert pv.shape == (pack_offset(pack_offset(nvir)),)
+    assert po.shape == (pack_offset(pack_offset(nocc)),)
+    assert pov.shape == (pack_offset(nocc * nvir),)
+    a, b, c, d = 3, 1, 2, 0                         # <ab|cd> = (ac|bd): P = (a,c), Q = (b,d)
+    P, Q = pack_offset(a) + c, pack_offset(b) + d
+    assert pv[pack_offset(P) + Q] == vvvv[a, b, c, d]
+    i, j, a, b = 2, 1, 3, 0                         # <ij|ab> = (ia|jb): P = (i,a), Q = (j,b)
+    P, Q = i * nvir + a, j * nvir + b
+    assert pov[pack_offset(P) + Q] == oovv[i, j, a, b]
+    gv, gov, go = pack_eri(cp.asarray(vvvv), cp.asarray(oovv), cp.asarray(oooo))
+    for g, h in zip((gv, gov, go), (pv, pov, po)):
+        assert isinstance(g, cp.ndarray)
+        np.testing.assert_array_equal(g.get(), h)
+
+
+@needs_gpu
+def test_strips_cover_the_operator():
+    """Strips tile every block; their storage is M plus the full diagonal blocks."""
+    from lib_pprpa.pprpa_eri_gpu import _pair_offset, _strips, pair_operator_bytes
+    nocc, nvir = 30, 70
+    for multi in ("s", "t"):
+        for rows in (None, 1, 4):
+            plan = _strips(nocc, nvir, multi, rows)
+            extra = 0
+            for kind, n in (("oo", nocc), ("vv", nvir), ("ov", nocc)):
+                spans = [(R0, R1) for k, _, _, R0, R1, _ in plan if k == kind]
+                assert spans[0][0] == 0 and spans[-1][1] == _pair_offset(n, multi)
+                assert [s[0] for s in spans[1:]] == [s[1] for s in spans[:-1]]
+                if kind != "ov":
+                    extra += sum(8 * (R1 - R0) * (R1 - R0 - 1) // 2 for R0, R1 in spans)
+            assert sum(s[-1] for s in plan) == pair_operator_bytes(nocc, nvir, multi) + extra
+
+
+@needs_gpu
 @pytest.mark.parametrize("multi", ("s", "t"))
 @pytest.mark.parametrize("ntri", (1, 7))
 def test_mvp_matches_cpu(multi, ntri):
     from lib_pprpa.pprpa_davidson import _pprpa_contraction
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
 
     rng = np.random.default_rng(4)
     nocc, nvir = 6, 8
@@ -84,54 +123,66 @@ def test_mvp_matches_cpu(multi, ntri):
     cpu = _solver(nocc, moe, multi, eri=(vvvv, oovv, oooo))
     tv = rng.standard_normal((ntri, cpu.full_dim))
     ref = _pprpa_contraction(cpu, tv)
+    packed = pack_eri(vvvv, oovv, oooo)
 
-    gpu = _solver(nocc, moe, multi)
-    attach_gpu_eri_contraction(gpu, vvvv, oovv, oooo, mode="resident")
-    np.testing.assert_allclose(gpu.contraction(tv), ref, rtol=1e-11, atol=1e-11)
-    for strip in (1, 5, 64):
-        attach_gpu_eri_contraction(gpu, vvvv, oovv, oooo, mode="streamed", strip=strip)
-        np.testing.assert_allclose(gpu.contraction(tv), ref, rtol=1e-11, atol=1e-11)
-    release_gpu_eri(gpu)
-    assert not hasattr(gpu, "_gpu_vvvv")
-    assert "contraction" not in gpu.__dict__
+    for mode, devices in (("resident", None), ("streamed", None), ("split", [0, 0])):
+        for rows in (None, 1, 2, 64):
+            gpu = _solver(nocc, moe, multi)
+            attach_gpu_eri_contraction(gpu, *packed, mode=mode, rows=rows, devices=devices)
+            np.testing.assert_allclose(gpu.contraction(tv), ref, rtol=1e-11, atol=1e-11)
+            release_gpu_eri(gpu)
+            assert not hasattr(gpu, "_gpu_eri") and "contraction" not in gpu.__dict__
 
 
 @needs_gpu
-def test_auto_mode_and_device_input():
+def test_operator_is_built_for_one_multiplicity():
     import cupy as cp
-    import cupyx
-    from lib_pprpa.gpu_mem import is_pinned
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
-
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
     rng = np.random.default_rng(2)
     nocc, nvir = 4, 5
     moe = rng.standard_normal(nocc + nvir)
-    vvvv, oovv, oooo = _random_eri(rng, nocc, nvir)
-    gpu = _solver(nocc, moe, "t")
-    attach_gpu_eri_contraction(gpu, vvvv, oovv, oooo)
-    assert gpu._gpu_eri_strip is None and isinstance(gpu._gpu_vvvv, cp.ndarray)
-    attach_gpu_eri_contraction(gpu, cp.asarray(vvvv), cp.asarray(oovv), cp.asarray(oooo))
-    assert gpu._gpu_eri_strip is None and isinstance(gpu._gpu_vvvv, cp.ndarray)
-    attach_gpu_eri_contraction(gpu, vvvv, oovv, oooo, mode="streamed")
-    assert 1 <= gpu._gpu_eri_strip <= nvir * nvir
-    assert isinstance(gpu._gpu_vvvv, np.ndarray)
-    assert all(is_pinned(b) for b in (gpu._gpu_vvvv, gpu._gpu_oooo, gpu._gpu_oovv))
-    # blocks already in pinned memory are streamed in place, not copied
-    pinned_vvvv = cupyx.empty_pinned(vvvv.shape)
-    pinned_vvvv[...] = vvvv
-    attach_gpu_eri_contraction(gpu, pinned_vvvv, oovv, oooo, mode="streamed", strip=5)
-    assert np.shares_memory(gpu._gpu_vvvv, pinned_vvvv)
-    attach_gpu_eri_contraction(gpu, vvvv, oovv, oooo, mode="streamed", pin=False)
-    assert not is_pinned(gpu._gpu_vvvv)
+    gpu = _solver(nocc, moe, "s")
+    attach_gpu_eri_contraction(gpu, *pack_eri(*_random_eri(rng, nocc, nvir)))
+    assert gpu._gpu_eri["mode"] == "resident"
+    gpu.contraction(rng.standard_normal((2, gpu.full_dim)))
+    op = gpu._gpu_eri
+    assert op["multi"] == "s" and op["blocks"] is None
+    assert all(isinstance(s[3], cp.ndarray) for s in op["strips"])
+    gpu.multi = "t"
+    gpu.check_parameter()
+    with pytest.raises(ValueError):
+        gpu.contraction(rng.standard_normal((2, gpu.full_dim)))
     release_gpu_eri(gpu)
+
+
+@needs_gpu
+def test_auto_mode_follows_free_memory(monkeypatch):
+    """'auto' streams when the operator and the product arrays do not fit the free
+    memory left after the workspace reserve, and keeps it resident when they do."""
+    from lib_pprpa import pprpa_eri_gpu as mod
+    from lib_pprpa.pprpa_davidson import _pprpa_contraction
+    rng = np.random.default_rng(8)
+    nocc, nvir = 4, 5
+    moe = rng.standard_normal(nocc + nvir)
+    eri = _random_eri(rng, nocc, nvir)
+    cpu = _solver(nocc, moe, "s", eri=eri)
+    tv = rng.standard_normal((3, cpu.full_dim))
+    for free, mode in ((512 * 1024**2, "streamed"), (2 * 1024**3, "resident")):
+        monkeypatch.setattr(mod, "free_bytes", lambda f=free: f)
+        gpu = _solver(nocc, moe, "s")
+        mod.attach_gpu_eri_contraction(gpu, *mod.pack_eri(*eri))
+        assert gpu._gpu_eri["mode"] == mode
+        np.testing.assert_allclose(gpu.contraction(tv), _pprpa_contraction(cpu, tv),
+                                   rtol=1e-11, atol=1e-11)
+        mod.release_gpu_eri(gpu)
 
 
 @needs_gpu
 @pytest.mark.parametrize("multi", ("s", "t"))
 def test_davidson_energies_match_cpu(multi):
-    """Full Davidson solve on a diamond cell: streamed GPU MVP vs the CPU use_eri path."""
+    """Full Davidson solve on a diamond cell: streamed pair operator vs the CPU use_eri path."""
     from pyscf.pbc import dft, gto
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
 
     a0 = 3.370137329
     cell = gto.M(atom=[["C", [0., 0., 0.]], ["C", [a0 / 2, a0 / 2, a0 / 2]]],
@@ -152,7 +203,7 @@ def test_davidson_energies_match_cpu(multi):
     cpu = _solver(nocc, mf.mo_energy, multi, eri=(vvvv, oovv, oooo))
     cpu.kernel(multi)
     gpu = _solver(nocc, mf.mo_energy, multi)
-    attach_gpu_eri_contraction(gpu, vvvv, oovv, oooo, mode="streamed", strip=3)
+    attach_gpu_eri_contraction(gpu, *pack_eri(vvvv, oovv, oooo), mode="streamed", rows=3)
     gpu.kernel(multi)
     exci_cpu = cpu.exci_s if multi == "s" else cpu.exci_t
     exci_gpu = gpu.exci_s if multi == "s" else gpu.exci_t

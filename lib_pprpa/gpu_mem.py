@@ -1,21 +1,18 @@
 '''Device- and host-memory bookkeeping shared by the GPU ao2mo and Davidson ERI paths.
 
-The active-space MO ERIs are three float64 blocks, vvvv (nvir^4), oooo (nocc^4)
-and oovv (nocc^2 nvir^2).  They are kept resident on the device when they fit
-``RESIDENT_VRAM_FRAC`` of its total memory and staged on the host otherwise.
-Host-staged blocks live in page-locked (pinned) memory so that streaming them
-to the device runs at the link rate instead of through the driver's bounce
-buffer (about 6x on a B200).
+The active-space MO ERIs are three float64 blocks stored as the lower triangles
+of their pair Gram matrices (``gpu_ao2mo``): vvvv and oooo over the compact
+pairs, oovv over all occupied-virtual pairs.  Host arrays live in page-locked
+(pinned) memory so that streaming them to the device runs at the link rate instead
+of through the driver's bounce buffer (about 6x on a B200).
 '''
 
 import numpy as np
 import cupy as cp
 
-__all__ = ['FFT_BATCH_MIN', 'RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes',
-           'plan_budget', 'empty_pinned', 'is_pinned', 'max_fft_batch']
+__all__ = ['FFT_BATCH_MIN', 'pack_offset', 'eri_bytes', 'free_bytes', 'plan_budget',
+           'empty_pinned', 'is_pinned', 'max_fft_batch']
 
-# Leaves room for the trial vectors, the SCF arrays and the gradient intermediates.
-RESIDENT_VRAM_FRAC = 0.75
 
 # Elements of one batched cuFFT plan.  Past 2^31 - 1 a plan either fails (Bluestein
 # path, a prime factor above 127: CUFFT_INVALID_SIZE on the 151^3 NV63 ke 600 mesh) or
@@ -52,20 +49,18 @@ def plan_budget(free):
     return max(0, free - max(_RESERVE_MIN, int(_RESERVE_FRAC * free)))
 
 
+def pack_offset(n):
+    '''Offset of row ``n`` of a packed lower triangle, n (n + 1) / 2: the number
+    of pairs p >= q of n orbitals, and the length of an n-row triangle.'''
+    n = int(n)
+    return n * (n + 1) // 2
+
+
 def eri_bytes(nocc, nvir):
-    '''Bytes of vvvv + oooo + oovv as float64.'''
+    '''Bytes of the packed vvvv + oooo + oovv as float64.'''
     nocc, nvir = int(nocc), int(nvir)
-    return (nvir**4 + nocc**4 + nocc**2 * nvir**2) * 8
-
-
-def fits_resident(nocc, nvir, extra_bytes=0, total_bytes=None, frac=RESIDENT_VRAM_FRAC):
-    '''True if the three ERI blocks plus ``extra_bytes`` fit ``frac`` of the device memory.
-
-    ``total_bytes`` overrides the device total (tests).
-    '''
-    if total_bytes is None:
-        total_bytes = cp.cuda.runtime.memGetInfo()[1]
-    return eri_bytes(nocc, nvir) + int(extra_bytes) <= int(frac * int(total_bytes))
+    return 8 * (pack_offset(pack_offset(nvir)) + pack_offset(pack_offset(nocc))
+                + pack_offset(nocc * nvir))
 
 
 def empty_pinned(shape, dtype=np.float64):
