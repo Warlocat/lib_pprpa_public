@@ -11,18 +11,26 @@ ever sees the even part of w.  On the Nyquist planes of an even mesh in a
 non-orthogonal cell w is not even, and the plain half kernel is off by 1e-8.
 '''
 
+import threading
+
 import numpy as np
 import cupy as cp
 import cupyx.scipy.fft as cufft
 from pyscf import lib
 from gpu4pyscf.pbc.dft import numint as gnumint
 
-from lib_pprpa.gpu_mem import free_bytes
+from lib_pprpa.gpu_mem import free_bytes, plan_budget
 
 __all__ = ['ao_loop', 'mo_on_grid', 'codensity', 'half_kernel', 'coulomb_potential']
 
 _KPTS0 = np.zeros((1, 3))
 _GRID_BLK_MIN = 4096
+# Peak device bytes per (component, AO, grid point) of gpu4pyscf's eval_ao_kpts,
+# its output included: 8.0 for deriv 0 and 1 (NV63 dzvp, nao 819, H200) -- the
+# output alone, no transient.
+_AO_BYTES = 8
+# batch shape whose cuFFT plans this thread's plan cache holds (coulomb_potential)
+_PLAN_SHAPE = threading.local()
 
 
 def ao_loop(cell, mesh, deriv=0, extra_per_point=0, blksize=None):
@@ -31,13 +39,16 @@ def ao_loop(cell, mesh, deriv=0, extra_per_point=0, blksize=None):
     Yields (g0, g1, aoT) with aoT (nao, g1-g0), real at Gamma, for ``deriv=0``;
     with ``deriv=1`` the raw (4, g1-g0, nao) values and gradients.
     ``extra_per_point`` is what the caller holds per grid point besides the AO
-    block and its evaluation transient.
+    block and its evaluation transient.  The caller's loop variable keeps the
+    previous chunk (and its per-point arrays) alive while the next one is
+    evaluated, so the plan holds two of each.
     '''
     coords = cell.gen_uniform_grids(mesh)
     ngrid = len(coords)
     ncomp = 1 + 3 * deriv
     if blksize is None:
-        blksize = int(0.4 * free_bytes()) // (16 * ncomp * cell.nao + int(extra_per_point))
+        blksize = plan_budget(free_bytes()) // (2 * (_AO_BYTES * ncomp * cell.nao
+                                                      + int(extra_per_point)))
     blksize = max(1, min(ngrid, max(_GRID_BLK_MIN, blksize)))
     for g0, g1 in lib.prange(0, ngrid, blksize):
         ao = cp.asarray(gnumint.eval_ao_kpts(cell, coords[g0:g1], kpts=_KPTS0, deriv=deriv)[0])
@@ -91,8 +102,17 @@ def half_kernel(w_flat, mesh):
 
 def coulomb_potential(rho, mesh, w_half):
     '''ifft(fft(rho) * w) for a batch of real functions, (f, ngrid) -> (f, ngrid),
-    through the real-to-complex half mesh with the symmetrised kernel.'''
+    through the real-to-complex half mesh with the symmetrised kernel.
+
+    The cuFFT plans of one batch shape stay cached per thread; a new shape (the
+    short last batch of a loop) clears them first, so the planners' bytes per
+    transform hold: two shapes' work areas never coexist.
+    '''
     nx, ny, nz = (int(m) for m in mesh)
+    shape = (rho.shape[0], nx, ny, nz)
+    if getattr(_PLAN_SHAPE, 'shape', None) != shape:
+        cp.fft.config.get_plan_cache().clear()
+        _PLAN_SHAPE.shape = shape
     vG = cufft.rfftn(rho.reshape(-1, nx, ny, nz), axes=(1, 2, 3))
     vG *= w_half
     vR = cufft.irfftn(vG, s=(nx, ny, nz), axes=(1, 2, 3), overwrite_x=True)

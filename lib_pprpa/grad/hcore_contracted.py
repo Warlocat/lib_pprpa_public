@@ -28,7 +28,7 @@ Gamma point only.
 
 import numpy as np
 import cupy as cp
-from lib_pprpa.gpu_mem import free_bytes
+from lib_pprpa.gpu_mem import free_bytes, plan_budget
 from gpu4pyscf.lib.cupy_helper import contract
 from gpu4pyscf.pbc import tools
 from gpu4pyscf.pbc.dft import numint as pbc_numint
@@ -78,12 +78,12 @@ def hcore_deriv_contracted(cell, kpts, dm):
     Z = None if cell._pseudo else cp.asarray(cell.atom_charges(), dtype=cp.float64)
     # get_coulG zeroes the first G it is given as G = 0, so it takes the whole mesh
     coulG = None if cell._pseudo else get_coulG(cell, mesh=mesh, Gv=Gv)
-    # ~6 (natm, blk) complex temporaries live at once; keep them under a fifth
-    # of the memory the driver reports free.
-    bytes_per_g = max(1, natm * 16 * 6)
-    blk = int(max(1, min(ngrids, int(free_bytes() * 0.2) // bytes_per_g)))
-    de = cp.zeros((natm, 3))
     vG = cp.empty(ngrids, dtype=cp.complex128)        # total local potential in G space
+    # at most 6 (natm, blk) complex arrays live at once (counted 5.5: SI_b, vlocG_b,
+    # coef_b and the temporaries of its product with rho_G)
+    bytes_per_g = max(1, natm * 16 * 6)
+    blk = int(max(1, min(ngrids, plan_budget(free_bytes()) // bytes_per_g)))
+    de = cp.zeros((natm, 3))
     for g0 in range(0, ngrids, blk):
         g1 = min(g0 + blk, ngrids)
         Gv_b = Gv[g0:g1]
@@ -98,7 +98,7 @@ def hcore_deriv_contracted(cell, kpts, dm):
         de += cp.einsum('gx,ag->ax', Gv_b, (coef_b.conj() * rho_G[g0:g1])).real
         # get_hcore's -sum_a SI vlocG (pseudo) and -sum_a Z SI coulG (all-electron)
         vG[g0:g1] = 1j * coef_b.sum(axis=0)
-        SI_b = coef_b = None
+        SI_b = coef_b = vlocG_b = None
     de /= ngrids
     if cell._pseudo:
         vG[0] = np.sum(get_alphas(cell))

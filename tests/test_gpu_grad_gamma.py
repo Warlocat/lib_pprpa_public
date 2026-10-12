@@ -135,7 +135,8 @@ def test_pairing_force_matches_aft(system, mult, store_phil, pairs_per_batch, mo
     one = pf.pairing_k_force_lowrank(cell, cell.mesh, C, M, store_phil=True)
     if pairs_per_batch is not None:
         ngrid = int(np.prod(cell.mesh))
-        budget = (pairs_per_batch + 0.5) * (pf._FFT_BYTES + 8) * ngrid / pf._FFT_BUDGET_FRAC
+        # plan_budget keeps 512 MB back; the rebuilt rows take one more row
+        budget = ((pairs_per_batch + 0.5) * (pf._FFT_BYTES + 8) + 8) * ngrid + 512 * 1024**2
         monkeypatch.setattr(pf, "free_bytes", lambda: int(budget))
     got = pf.pairing_k_force_lowrank(cell, cell.mesh, C, M, store_phil=store_phil)
     assert np.abs(got - ref).max() < 1e-6 * np.abs(ref).max()

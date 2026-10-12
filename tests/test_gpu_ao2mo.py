@@ -92,10 +92,10 @@ def test_free_bytes_releases_cached_memory():
 
 
 def test_max_fft_batch():
-    from lib_pprpa.gpu_mem import max_fft_batch, needs_bluestein
-    assert needs_bluestein((151, 151, 151)) and not needs_bluestein((107, 128, 159))
-    assert max_fft_batch(151**3, (151, 151, 151)) == (2**31 - 1) // 151**3
-    assert max_fft_batch(159**3, (159, 159, 159)) == int(1.5 * 2**31) // 159**3
+    from lib_pprpa.gpu_mem import max_fft_batch
+    for n in (107, 151, 159):                    # every mesh stays below 2^31 elements
+        assert max_fft_batch(n**3) == (2**31 - 1) // n**3 and max_fft_batch(n**3) * n**3 < 2**31
+    assert max_fft_batch(2**31) == 1
 
 
 def test_coulomb_potential_matches_complex_chain():

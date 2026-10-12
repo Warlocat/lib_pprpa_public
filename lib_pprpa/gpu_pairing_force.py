@@ -24,7 +24,7 @@ from pyscf.lib import logger
 from gpu4pyscf.pbc import tools as gtools
 
 from lib_pprpa.gpu_coulomb import ao_loop, codensity, coulomb_potential, half_kernel, mo_on_grid
-from lib_pprpa.gpu_mem import free_bytes, max_fft_batch
+from lib_pprpa.gpu_mem import FFT_BATCH_MIN, free_bytes, max_fft_batch, plan_budget
 
 __all__ = ['pairing_k_force_lowrank']
 
@@ -32,7 +32,6 @@ __all__ = ['pairing_k_force_lowrank']
 # peaks at 56.4 (codensities, half spectrum, real output, two cuFFT work areas,
 # measured on the 159^3 mesh, see gpu_ao2mo) plus 8 for the scratch of the W updates.
 _FFT_BYTES = 64
-_FFT_BUDGET_FRAC = 0.3
 
 
 def pairing_k_force_lowrank(cell, mesh, C, M, store_phil=None, verbose=None):
@@ -44,8 +43,8 @@ def pairing_k_force_lowrank(cell, mesh, C, M, store_phil=None, verbose=None):
 
     Kwargs:
         store_phil : keep phiL = M^T phiC on the device (True) or rebuild its rows
-            from phiC per block (False).  None keeps it when it fits beside the
-            FFT budget.
+            from phiC per block (False).  None keeps it when an FFT batch of
+            gpu_mem.FFT_BATCH_MIN codensities still fits beside it.
     '''
     log = logger.new_logger(cell, verbose)
     t0 = log.init_timer()
@@ -70,15 +69,16 @@ def pairing_k_force_lowrank(cell, mesh, C, M, store_phil=None, verbose=None):
     W = cp.zeros((r, ngrid))
     phil_bytes = r * ngrid * 8
     if store_phil is None:
-        store_phil = phil_bytes <= (1 - _FFT_BUDGET_FRAC) * free_bytes()
+        store_phil = phil_bytes + FFT_BATCH_MIN * _FFT_BYTES * ngrid <= plan_budget(free_bytes())
     if store_phil:
         phiL = Mk.T @ phiC
         fft_bytes = _FFT_BYTES
     else:
         phiL = None
         fft_bytes = _FFT_BYTES + 8                           # rebuilt phiL rows
-    blk = int(_FFT_BUDGET_FRAC * free_bytes()) // (fft_bytes * ngrid)
-    blk = max(1, min(npair, blk, max_fft_batch(ngrid, mesh)))
+    # the rebuilt rows take one more row than the batch (rows_buf)
+    blk = (plan_budget(free_bytes()) - (0 if store_phil else 8 * ngrid)) // (fft_bytes * ngrid)
+    blk = max(1, min(npair, blk, max_fft_batch(ngrid)))
     log.debug('pairing force: rank %d, store_phil %s, %d pairs per FFT batch',
               r, store_phil, blk)
     scratch = cp.empty((blk, ngrid))
@@ -104,7 +104,8 @@ def pairing_k_force_lowrank(cell, mesh, C, M, store_phil=None, verbose=None):
             if k > 0:
                 cp.multiply(phiL_m, Vs[:k], out=scratch[:k])
                 W[n] += scratch[:k].sum(axis=0)             # W_n += phiL_m V_nm
-    V = scratch = rows_buf = phiL = phiC = None
+        V = Vs = None                   # before the next batch: _FFT_BYTES counts one V
+    scratch = rows_buf = phiL = phiC = None
     t0 = log.timer(f'pairing force: {npair} codensity pairs (rank {r})', *t0)
 
     G = cp.zeros((3, nao, r))

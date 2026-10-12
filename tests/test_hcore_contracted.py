@@ -59,9 +59,10 @@ def _reference_gpu(cell, dm):
 
 
 @pytest.mark.parametrize("pseudo", [True, False])
-@pytest.mark.parametrize("free", [None, 96_000])
+@pytest.mark.parametrize("free", [None, 512 * 1024**2 + 19_200])
 def test_matches_per_atom_generator(pseudo, free, monkeypatch):
-    """Whole mesh in one block and ~100-point blocks; pyscf's CPU generator is pseudo-only."""
+    """Whole mesh in one block and ~100-point blocks (512 MB reserve + 100 x 192 B);
+    pyscf's CPU generator is pseudo-only."""
     import lib_pprpa.grad.hcore_contracted as hc
     if free is not None:
         monkeypatch.setattr(hc, "free_bytes", lambda: free)

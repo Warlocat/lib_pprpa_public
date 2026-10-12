@@ -11,19 +11,24 @@ buffer (about 6x on a B200).
 import numpy as np
 import cupy as cp
 
-__all__ = ['RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes', 'empty_pinned',
-           'is_pinned', 'needs_bluestein', 'max_fft_batch']
+__all__ = ['FFT_BATCH_MIN', 'RESIDENT_VRAM_FRAC', 'eri_bytes', 'fits_resident', 'free_bytes',
+           'plan_budget', 'empty_pinned', 'is_pinned', 'max_fft_batch']
 
 # Leaves room for the trial vectors, the SCF arrays and the gradient intermediates.
 RESIDENT_VRAM_FRAC = 0.75
 
-# cuFFT rejects a batched plan of more than 2^31 - 1 elements when a transform
-# dimension has a prime factor above 127 and takes the Bluestein path
-# (CUFFT_INVALID_SIZE, e.g. the 151^3 mesh of the NV63 cell at ke = 600 Ha).
-# Direct-path meshes ran 1.5 x 2^31 on a B200, so they get that relaxed cap.
+# Elements of one batched cuFFT plan.  Past 2^31 - 1 a plan either fails (Bluestein
+# path, a prime factor above 127: CUFFT_INVALID_SIZE on the 151^3 NV63 ke 600 mesh) or
+# goes 64-bit with a work area that triples the R2C chain's device memory (107^3 on an
+# H200: 16.1 -> 48.1 B per element at 2^31); throughput saturates at FFT_BATCH_MIN.
 CUFFT_MAX_PLAN_ELEMENTS = 2**31 - 1
-CUFFT_MAX_PLAN_ELEMENTS_DIRECT = int(1.5 * 2**31)
-_CUFFT_MAX_DIRECT_PRIME = 127
+# Left out of every planned budget: cuBLAS / cuFFT workspaces and the pool's rounding.
+_RESERVE_FRAC = 0.06
+_RESERVE_MIN = 512 * 1024**2
+# Transforms per cuFFT batch at which the R2C Coulomb chain saturates: within 1.5%
+# of the time per transform of batch 128 on 107^3 and 159^3 meshes (H200); batch 1
+# is 16% / 52% slower.
+FFT_BATCH_MIN = 16
 
 
 def free_bytes():
@@ -39,6 +44,12 @@ def free_bytes():
     cp.get_default_memory_pool().free_all_blocks()
     cp.fft.config.get_plan_cache().clear()
     return cp.cuda.runtime.memGetInfo()[0]
+
+
+def plan_budget(free):
+    '''Bytes a planner may fill out of ``free`` device bytes, after the workspace reserve.'''
+    free = int(free)
+    return max(0, free - max(_RESERVE_MIN, int(_RESERVE_FRAC * free)))
 
 
 def eri_bytes(nocc, nvir):
@@ -80,22 +91,6 @@ def is_pinned(array):
     return attrs.type == cp.cuda.runtime.memoryTypeHost
 
 
-def _largest_prime_factor(n):
-    n = int(n)
-    largest, p = 1, 2
-    while p * p <= n:
-        while n % p == 0:
-            largest, n = p, n // p
-        p += 1
-    return max(largest, n) if n > 1 else largest
-
-
-def needs_bluestein(mesh):
-    '''True if a mesh dimension has a prime factor cuFFT cannot handle directly.'''
-    return any(_largest_prime_factor(n) > _CUFFT_MAX_DIRECT_PRIME for n in mesh)
-
-
-def max_fft_batch(ngrid, mesh):
+def max_fft_batch(ngrid):
     '''Largest number of ``ngrid``-point transforms one cuFFT plan may batch.'''
-    limit = CUFFT_MAX_PLAN_ELEMENTS if needs_bluestein(mesh) else CUFFT_MAX_PLAN_ELEMENTS_DIRECT
-    return max(1, limit // int(ngrid))
+    return max(1, CUFFT_MAX_PLAN_ELEMENTS // int(ngrid))

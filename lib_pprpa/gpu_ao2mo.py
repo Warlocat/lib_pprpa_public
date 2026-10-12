@@ -30,7 +30,8 @@ from pyscf.lib import logger
 from gpu4pyscf.pbc import tools as gtools
 
 from lib_pprpa.gpu_coulomb import codensity, coulomb_potential, half_kernel, mo_on_grid
-from lib_pprpa.gpu_mem import empty_pinned, eri_bytes, fits_resident, free_bytes, max_fft_batch
+from lib_pprpa.gpu_mem import (FFT_BATCH_MIN, empty_pinned, eri_bytes, fits_resident,
+                                free_bytes, max_fft_batch, plan_budget)
 
 __all__ = ['gpu_ao2mo_blocks', 'PAIR_BLK_CAP']
 
@@ -43,11 +44,6 @@ PAIR_BLK_CAP = 5000
 # GEMM operand strips (vR and the inner codensity).
 _FFT_BYTES = 56
 _GEMM_BYTES = 16
-# Share of the strip budget for the FFT sub-batch; the transform is ~0.1% of the
-# flops and only needs to keep cuFFT busy.
-_FFT_BUDGET_FRAC = 0.15
-_FFT_BLK_MIN = 16
-_RESERVE_FRAC = 0.06
 
 
 class _PairLayout:
@@ -135,14 +131,12 @@ def _write_tile(out, tile, layout, pa, pb, ra, rb):
 def _plan_strips(layout, ngrid, mesh, pair_blk=None):
     '''(pair_blk, fft_blk): GEMM strip width and FFT sub-batch from free memory.
 
-    The FFT sub-batch takes ``_FFT_BUDGET_FRAC`` of the budget within the cuFFT
-    plan cap; the strip then solves 8 b^2 + 16 ngrid b <= rest (a b x b tile
+    The FFT sub-batch is gpu_mem.FFT_BATCH_MIN transforms, where cuFFT saturates,
+    within the cuFFT plan cap; the strip then solves 8 b^2 + 16 ngrid b <= rest (a b x b tile
     plus the two operand strips), rounded to whole rows and capped.
     '''
-    free = free_bytes()
-    budget = max(0, free - max(512 * 1024**2, int(_RESERVE_FRAC * free)))
-    fblk = max(_FFT_BLK_MIN, int(_FFT_BUDGET_FRAC * budget) // (_FFT_BYTES * ngrid))
-    fblk = max(1, min(fblk, max_fft_batch(ngrid, mesh), layout.npair))
+    budget = plan_budget(free_bytes())
+    fblk = max(1, min(FFT_BATCH_MIN, max_fft_batch(ngrid), layout.npair))
     if pair_blk is None:
         rest = max(0, budget - _FFT_BYTES * ngrid * fblk)
         lin = _GEMM_BYTES * ngrid

@@ -31,11 +31,12 @@ from pyscf import lib
 from pyscf.lib import logger
 from gpu4pyscf.lib.cupy_helper import pin_memory
 
-from lib_pprpa.gpu_mem import eri_bytes, fits_resident, free_bytes, is_pinned
+from lib_pprpa.gpu_mem import eri_bytes, fits_resident, free_bytes, is_pinned, plan_budget
 
 _INV_SQRT2 = 1.0 / math.sqrt(2.0)
-# Share of the free device memory one streamed row strip may occupy.
-_STRIP_MEM_FRAC = 0.25
+# Bound on the ntri x (nocc^2 + nvir^2) float64 arrays one streamed MVP holds besides
+# its strip: trial vectors, z, z^T, the products and their transposes (counted 4.5).
+_MVP_ARRAYS = 6
 
 
 def attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo, mode="auto", strip=None,
@@ -47,7 +48,8 @@ def attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo, mode="auto", strip=None,
             device when they are already cupy arrays or fit
             gpu_mem.RESIDENT_VRAM_FRAC of its memory, and streams them otherwise.
         strip : rows of a block uploaded per GEMM in streamed mode; default from
-            the free device memory.
+            the free device memory beside the arrays of the largest trial block
+            (max_vec + nroot vectors).
         pin : in streamed mode, copy host blocks that are not already pinned into
             pinned memory (one host copy per block); uploads then run at the
             link rate.  Blocks already pinned (gpu_mem.empty_pinned) are used as is.
@@ -68,7 +70,9 @@ def attach_gpu_eri_contraction(pprpa, vvvv, oovv, oooo, mode="auto", strip=None,
     pprpa._gpu_oovv = _flat(oovv, nocc, nvir, mode, pin)
     if mode == "streamed" and strip is None:
         n2 = max(nocc * nocc, nvir * nvir)
-        strip = max(1, min(n2, int(_STRIP_MEM_FRAC * free_bytes()) // (8 * n2)))
+        ntri = pprpa.max_vec + pprpa.nroot
+        mvp = 8 * _MVP_ARRAYS * ntri * (nocc * nocc + nvir * nvir)
+        strip = max(1, min(n2, (plan_budget(free_bytes()) - mvp) // (8 * n2)))
     pprpa._gpu_eri_strip = strip if mode == "streamed" else None
     pprpa._gpu_mo_energy = cp.asarray(pprpa.mo_energy)
     # a tiny host array so kernel()'s `data_type = pprpa.vvvv.dtype` still works
