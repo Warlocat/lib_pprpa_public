@@ -120,7 +120,7 @@ def _pipeline(cell, want_grad):
         cp.get_default_memory_pool().free_all_blocks()
         return e_state
 
-    # 4) GPU Gamma-point gradient (low-rank exchange of the pair densities built in)
+    # 4) GPU Gamma-point gradient
     xy = (mp.xy_s if MULT == "s" else mp.xy_t)[ISTATE]
     g = gpugrad.Gradients(mp, mf, MULT, ISTATE)
     g.cphf_x0 = _state["cphf_x0"]

@@ -23,9 +23,10 @@ Key conventions / gpu4pyscf quirks (see also grad_utils_gpu_pbc):
 * pp-RPA pairing exchange: X = [C_v, C_o] diag(x, y) [C_v, C_o]^T has rank <= nocc + nvir,
   so its force is one FFT pass over the active-MO codensities plus a gradient-AO
   pass; exact for a general X, no symmetric/antisymmetric split.
-* The 2-RDM exchange K[X], K[Y] of the relaxed density uses the same factors
-  (``gpu_fft_k.pair_get_k_lowrank``); the CPHF solution is kept on the
-  ``Gradients`` object (``cphf_x0``) as the warm start of the next geometry.
+* The relaxed density's exchange K[X + Y] @ orbp is weight * ao^T W^T for the same
+  potential grids W, so one FFT pass (``pair_potential_lowrank``) serves both, and W
+  is released before the CPHF solve; the CPHF solution is kept on the ``Gradients``
+  object (``cphf_x0``) as the warm start of the next geometry.
 
 Requirements / scope
 --------------------
@@ -45,9 +46,9 @@ from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
 from lib_pprpa.gpu_emulation import emulation_available, fp64_emulation
-from lib_pprpa.gpu_fft_k import pair_get_k_lowrank
 from lib_pprpa.gpu_mem import pooled
-from lib_pprpa.gpu_pairing_force import pairing_k_force_lowrank
+from lib_pprpa.gpu_pairing_force import (pair_exchange, pair_potential_lowrank,
+                                         pairing_k_force_lowrank)
 from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
 
 
@@ -160,14 +161,23 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         vresp = make_gpu_vresp(cell, mf)   # GPU grid response for the CPHF solve
     else:
         vresp = None
-    # The pair densities have rank <= the active space: build their exchange
-    # from the factors instead of the dense nao x nao FFT kernel.
+    # X + Y = orbp diag(y, x) orbp^T has rank <= the active space: the potential grids
+    # of its codensities, built once, give both its exchange K[X + Y] @ orbp for the
+    # relaxed density and the pp-RPA pairing exchange force
+    # 2 sum_{i in A} sum_l (d_x K[X])_il X_il (exact for a general X)
     orbp = mo[:, nfo:nfo + nocc + nvir]
+    occ_y, vir_x = get_xy_full(
+        xy, pprpa.oo_dim, mult, nocc=nocc, nvir=nvir)
+    Mp = block_diag(occ_y, vir_x)
+    Wp = pair_potential_lowrank(cell, cell.mesh, orbp, Mp, devices=pprpa_grad.devices)
+    pair_k = pair_exchange(cell, cell.mesh, Wp)
+    de_pairing = pairing_k_force_lowrank(cell, cell.mesh, orbp, Mp, W=Wp)
+    Wp = None
     cphf_out = {}
     P_mo, W_mo = make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
         cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
-        pair_get_k=pair_get_k_lowrank(cell, mf, orbp, devices=pprpa_grad.devices),
+        pair_k=pair_k,
         cphf_x0=pprpa_grad.cphf_x0, cphf_x0_out=cphf_out)
     pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
     W = mo @ W_mo @ mo.T \
@@ -176,13 +186,6 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     pprpa_grad.rdm1e = P
     D = kmf_cpu.make_rdm1()[0]
     T = D + P
-    occ_y, vir_x = get_xy_full(
-        xy, pprpa.oo_dim, mult, nocc=nocc, nvir=nvir)
-    cocc = mo[:, nfo:nfo+nocc]
-    cvir = mo[:, nfo+nocc:nfo+nocc+nvir]
-    # X = cvir x cvir^T + cocc y cocc^T = Cf Mf Cf^T, rank <= nocc + nvir
-    Cf = np.hstack([cvir, cocc])
-    Mf = block_diag(vir_x, occ_y)
 
     # --- GPU assembly --------------------------------------------------------
     if is_ks:
@@ -243,9 +246,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
                 omega=omega, exxdiv=exxdiv))
         de += dvk(Tg) - dvk(Pg)
 
-    # pp-RPA pairing exchange force 2 sum_{i in A} sum_l (d_x K[X])_il X_il from
-    # the factors of X (exact for a general X)
-    de += cp.asarray(pairing_k_force_lowrank(cell, cell.mesh, Cf, Mf))
+    de += cp.asarray(de_pairing)
 
     # Vxc skeleton (contract with T) + fxc.P skeleton (contract with D)
     if is_ks:
@@ -273,8 +274,8 @@ class Gradients(_cpu.Gradients):
         # AO-basis CPHF solution of the previous evaluation, used as the
         # initial guess for the next one.  See make_rdm1_relaxed_rhf_pprpa.
         self.cphf_x0 = None
-        # CUDA devices the 2-RDM exchange is dispatched over; None is the
-        # current device.
+        # CUDA devices the pair-potential FFT pass (relaxed-density exchange and
+        # pairing force) is dispatched over; None is the current device.
         self.devices = None
 
     def grad_elec(self, xy, mult, atmlst):
