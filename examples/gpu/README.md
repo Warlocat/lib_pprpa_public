@@ -177,10 +177,11 @@ export LD_LIBRARY_PATH=$CU/lib:$SP/cutensor/lib:$LD_LIBRARY_PATH
 
 ## Scope / notes
 - Gamma point, RKS/RHF reference, LDA/GGA/hybrid functionals.
-- The RKS CPHF/Z-vector solve uses native
-  `KRKS.gen_response(singlet=None, hermi=1)`, which caches the XC kernel once
-  for all response applications.  The ppRPA-specific nuclear XC-gradient
-  skeleton remains in `lib_pprpa.grad.grad_utils_gpu_pbc`.
+- The RKS CPHF/Z-vector solve uses `gpu_response.fused_response` (J inside the
+  fxc pass) for LDA/GGA and native `KRKS.gen_response(singlet=None, hermi=1)`
+  otherwise; both cache the XC kernel once for all response applications.  The
+  ppRPA-specific nuclear XC-gradient skeleton remains in
+  `lib_pprpa.grad.grad_utils_gpu_pbc`.
 - The example uses the **AO-direct** GPU Davidson (library-only). At large active
   spaces the **MO-eri** path (GPU FFT ao2mo + batched `use_eri` contraction) is
   much faster — that is the path used for the NV-center production runs.
