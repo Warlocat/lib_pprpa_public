@@ -25,10 +25,13 @@ __all__ = ['EMULATION_MIN_WIDTH', 'emulation_available', 'emulation_pays', 'fp64
 # Harmonic width m n / (m + n) above which an eager emulated DGEMM beats native
 # fp64, per compute-capability major, measured with cuBLAS 13.8 for k = 3e5-4e6:
 # B200 crosses over at ~380 (square b ~ 770); H200 only gains from ~1200
-# (1.16x at 2400^2, 1.36x at 5000^2) and its ``performant`` heuristic loses.
-EMULATION_MIN_WIDTH = {9: 1200, 10: 400}
-# Architectures where ``performant`` never loses to native in our measurements.
-_PERFORMANT_ARCH = (10,)
+# (1.16x at 2400^2, 1.36x at 5000^2) and its ``performant`` heuristic loses; the
+# RTX Pro 6000 Blackwell (1/64 fp64) already gains 2.6x at 512^2 (width 256) and
+# 1.8x at 384^2, up to 14.6x at 5000^2.
+EMULATION_MIN_WIDTH = {9: 1200, 10: 400, 12: 200}
+# Architectures where ``performant`` never loses to native in our measurements
+# (on cc 12 it takes every tile from 256^2 up and declines the small GEMMs).
+_PERFORMANT_ARCH = (10, 12)
 
 _FP64_EMULATED_FIXEDPOINT_MATH = 8      # cublasMath_t
 _STRATEGY = {'default': 0, 'performant': 1, 'eager': 2}
