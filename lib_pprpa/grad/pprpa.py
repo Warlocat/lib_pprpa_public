@@ -1,6 +1,7 @@
 import numpy as np
 from functools import reduce
 from scipy.linalg import block_diag
+from scipy.sparse.linalg import LinearOperator, gmres
 from pyscf import lib, scf
 from pyscf.df.df_jk import _DFHF
 from pyscf.lib import logger
@@ -168,7 +169,7 @@ def grad_elec_mf(mf, atmlst=None):
 
 
 def make_rdm1_relaxed_rhf_pprpa(
-        pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20,
+        pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=100,
         cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None, pair_k=None,
         cphf_x0=None, cphf_x0_out=None):
     r"""Calculate relaxed density matrix (and the I intermediates)
@@ -188,6 +189,10 @@ def make_rdm1_relaxed_rhf_pprpa(
             pair density on the active orbitals, when the caller already has it;
             pair_get_k is then not called.
     Args:
+        cphf_conv_tol: relative residual |b - (1 + A) x| / |b| at which the
+            CPHF (GMRES) solve stops.
+        cphf_max_cycle: response evaluations allowed; RuntimeError if
+            cphf_conv_tol is not reached within them.
         cphf_x0: optional AO-basis initial guess for the CPHF solution, as
             returned through ``cphf_x0_out`` by an earlier call.  Along a
             geometry optimization the previous step's solution is a good
@@ -389,9 +394,8 @@ def make_rdm1_relaxed_rhf_pprpa(
         v1ao = vresp(dm + dm.T)
         return reduce(np.dot, (orbA.T, v1ao, orbI)).ravel()
 
-    # pyscf.scf.cphf.solve does not forward an initial guess to lib.krylov, so
-    # solve_nos1 is inlined here to pass one.  With x0 None the arithmetic is
-    # identical to cphf.solve.
+    # pyscf.scf.cphf.solve's equations (solve_nos1), solved here so that an initial guess
+    # and a residual-based stop can be passed.
     x0 = None
     if cphf_x0 is not None and cphf_x0.shape == (mf.mol.nao, mf.mol.nao):
         # The AO basis is not orthogonal, so C^T D C is not the inverse of
@@ -414,9 +418,17 @@ def make_rdm1_relaxed_rhf_pprpa(
         v = v.reshape(-1, nvir_all, nocc_all_) * e_ai
         return v.reshape(-1, nvir_all * nocc_all_)
 
-    mo1 = lib.krylov(vind_vo, mo1base.reshape(-1, nvir_all * nocc_all_),
-                     x0=None if x0 is None else x0.reshape(-1, nvir_all * nocc_all_),
-                     tol=cphf_conv_tol, max_cycle=cphf_max_cycle, hermi=False)
+    # (1 + A) x = b stopped at |b - (1 + A) x| <= cphf_conv_tol |b|.  lib.krylov stops on
+    # the absolute size of its newest subspace vector instead, and so in practice runs to
+    # machine precision whatever the tolerance.
+    nvo = nvir_all * nocc_all_
+    op = LinearOperator((nvo, nvo), dtype=mo1base.dtype,
+                        matvec=lambda v: v + vind_vo(v).ravel())
+    mo1, info = gmres(op, mo1base.ravel(), x0=None if x0 is None else x0.ravel(),
+                      rtol=cphf_conv_tol, atol=0.0, restart=cphf_max_cycle, maxiter=1)
+    if info != 0:
+        raise RuntimeError('CPHF did not converge to %g in %d iterations'
+                           % (cphf_conv_tol, cphf_max_cycle))
     d_prime[slice_A, slice_I] = mo1.reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
 
     # Hand the solution back in the AO basis: between geometry steps the MO
@@ -457,7 +469,8 @@ def make_rdm1_relaxed_rhf_pprpa(
 
 
 class Gradients(rhf_grad.Gradients):
-    cphf_max_cycle = 20
+    # GMRES raises past it; NV63 and NV215 converge to 1e-8 in 16-18 responses
+    cphf_max_cycle = 100
     cphf_conv_tol = 1e-8
 
     _keys = {

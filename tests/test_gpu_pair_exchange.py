@@ -103,3 +103,40 @@ def test_shared_pair_potential(diamond, mult):
     f_shared = pairing_k_force_lowrank(cell, cell.mesh, orbp, M, W=W)
     f_own = pairing_k_force_lowrank(cell, cell.mesh, orbp, M)
     assert np.abs(f_shared - f_own).max() < 1e-10 * np.abs(f_own).max()
+
+
+def test_cphf_stops_at_the_requested_residual(diamond):
+    """The CPHF solve stops on its relative residual: a loose tolerance takes fewer
+    response evaluations and lands within it of the tight solution."""
+    from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
+    from lib_pprpa.pprpa_davidson import ppRPA_Davidson
+    cell, mf = diamond
+    nocc = cell.nelectron // 2
+    nmo = cell.nao
+    eri = mf.with_df.get_mo_eri(mf.mo_coeff, compact=False)
+    eri = eri.reshape(nmo, nmo, nmo, nmo).transpose(0, 2, 1, 3)
+    solver = ppRPA_Davidson(nocc, mf.mo_energy, Lpq=None, channel="hh", nroot=2,
+                            residue_thresh=1e-10, trial="identity")
+    solver.mu = 0.0
+    solver.use_eri(np.ascontiguousarray(eri[nocc:, nocc:, nocc:, nocc:]),
+                   np.ascontiguousarray(eri[:nocc, :nocc, nocc:, nocc:]),
+                   np.ascontiguousarray(eri[:nocc, :nocc, :nocc, :nocc]))
+    solver.kernel("t")
+    response = mf.gen_response(singlet=None, hermi=1)
+    calls = []
+
+    def vresp(dm):
+        calls.append(1)
+        return response(dm)
+
+    def run(tol):
+        calls.clear()
+        den, _ = make_rdm1_relaxed_rhf_pprpa(
+            solver, mf, mult="t", cphf_conv_tol=tol, cphf_max_cycle=60, vresp=vresp,
+            pair_get_k=lambda dms, hermi: _dense_k(cell, dms))
+        return den, len(calls)
+
+    loose, n_loose = run(1e-4)
+    tight, n_tight = run(1e-12)
+    assert n_loose < n_tight
+    assert np.abs(loose - tight).max() < 1e-2 * np.abs(tight).max()

@@ -12,7 +12,7 @@ urls = { "Homepage" = "https://github.com/lijiachen417/lib_pprpa" }
 dependencies = [
   "numpy<=2.3",
   "h5py",
-  "scipy",
+  "scipy>=1.12",
   "pyscf>=2.13",
 ]
 classifiers = [
