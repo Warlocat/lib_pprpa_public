@@ -67,11 +67,35 @@ def test_pair_layout_and_tile_scatter(compact, blk):
     np.testing.assert_allclose(out, _reference_block(phiA, phiB, W), rtol=0, atol=1e-12)
 
 
+def test_free_bytes_releases_cached_memory():
+    """Freed pool blocks and cached cuFFT plans count as free."""
+    import cupy as cp
+    import cupyx.scipy.fft as cufft
+    from gpu4pyscf.lib import cupy_helper  # noqa: F401  (the >100 MB cudaMalloc allocator)
+    from lib_pprpa.gpu_mem import free_bytes
+    n = 96
+
+    def work():
+        rows = [cp.ones(4 * 1024**2) for _ in range(64)]      # 64 pooled 32 MiB blocks
+        cufft.irfftn(cufft.rfftn(cp.ones((8, n, n, n)), axes=(1, 2, 3)), s=(n, n, n),
+                     axes=(1, 2, 3))
+        return len(rows)
+
+    work()                       # cuFFT loads its kernels for this shape once per process
+    before = free_bytes()
+    work()
+    cache = cp.fft.config.get_plan_cache()
+    assert cache.get_curr_size() > 0
+    after = free_bytes()
+    assert cache.get_curr_size() == 0
+    assert after > before - 16 * 1024**2
+
+
 def test_max_fft_batch():
-    from lib_pprpa.gpu_mem import max_fft_batch, needs_bluestein
-    assert needs_bluestein((151, 151, 151)) and not needs_bluestein((107, 128, 159))
-    assert max_fft_batch(151**3, (151, 151, 151)) == (2**31 - 1) // 151**3
-    assert max_fft_batch(159**3, (159, 159, 159)) == int(1.5 * 2**31) // 159**3
+    from lib_pprpa.gpu_mem import max_fft_batch
+    for n in (107, 151, 159):                    # every mesh stays below 2^31 elements
+        assert max_fft_batch(n**3) == (2**31 - 1) // n**3 and max_fft_batch(n**3) * n**3 < 2**31
+    assert max_fft_batch(2**31) == 1
 
 
 def test_coulomb_potential_matches_complex_chain():

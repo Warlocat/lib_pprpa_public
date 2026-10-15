@@ -12,7 +12,7 @@ W=energy-weighted dm, X=pp-RPA 2-RDM amplitude density):
   ovlp    : krhf_g.contract_h1e_dm(s1, W)            (note +=, W carries -dme0)
   J ref   : polarization Q(T)-Q(P) via jk_energy_per_atom(j=1,sr=lr=hyb), FFTDF
   hyb K   : Q(T)-Q(P) via jk_energy_per_atom(j=0,sr=lr=hyb), AFTDF   (only if hyb)
-  pairing : gpu_pairing_force.pairing_k_force_lowrank(L, R) for X = L R^T, FFT
+  pairing : gpu_pairing_force.pairing_k_force_lowrank(C, M) for X = C M C^T, FFT
   Vxc     : 2*einsum(v1ao[1:,atom], T) from grad_utils_gpu_pbc._contract_xc_kernel
   fxc     : 1*einsum(f1vo[1:,atom], D)  (same routine; factor 1 = CPU's 0.5*..*2)
   PP nl   : pp.vppnl_nuc_grad(T)
@@ -20,7 +20,7 @@ W=energy-weighted dm, X=pp-RPA 2-RDM amplitude density):
 Key conventions / gpu4pyscf quirks (see also grad_utils_gpu_pbc):
 * J derivatives use FFTDF (``get_j_e1`` exists, fast); K derivatives use AFTDF
   because FFTDF ``get_k_e1`` is NotImplemented.  AFT matches FFT to ~1e-8.
-* pp-RPA pairing exchange: X = [C_v x, C_o y] [C_v, C_o]^T has rank <= nocc + nvir,
+* pp-RPA pairing exchange: X = [C_v, C_o] diag(x, y) [C_v, C_o]^T has rank <= nocc + nvir,
   so its force is one FFT pass over the active-MO codensities plus a gradient-AO
   pass; exact for a general X, no symmetric/antisymmetric split.
 * The 2-RDM exchange K[X], K[Y] of the relaxed density uses the same factors
@@ -38,6 +38,7 @@ Requirements / scope
 """
 import numpy as np
 import cupy as cp
+from scipy.linalg import block_diag
 
 from pyscf import lib
 from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
@@ -174,9 +175,9 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         xy, pprpa.oo_dim, mult, nocc=nocc, nvir=nvir)
     cocc = mo[:, nfo:nfo+nocc]
     cvir = mo[:, nfo+nocc:nfo+nocc+nvir]
-    # X = cvir x cvir^T + cocc y cocc^T = Lf Rf^T, rank <= nocc + nvir
-    Lf = np.hstack([cvir @ vir_x, cocc @ occ_y])
-    Rf = np.hstack([cvir, cocc])
+    # X = cvir x cvir^T + cocc y cocc^T = Cf Mf Cf^T, rank <= nocc + nvir
+    Cf = np.hstack([cvir, cocc])
+    Mf = block_diag(vir_x, occ_y)
 
     # --- GPU assembly --------------------------------------------------------
     if is_ks:
@@ -236,7 +237,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
 
     # pp-RPA pairing exchange force 2 sum_{i in A} sum_l (d_x K[X])_il X_il from
     # the factors of X (exact for a general X)
-    de += cp.asarray(pairing_k_force_lowrank(cell, cell.mesh, Lf, Rf))
+    de += cp.asarray(pairing_k_force_lowrank(cell, cell.mesh, Cf, Mf))
 
     # Vxc skeleton (contract with T) + fxc.P skeleton (contract with D)
     if is_ks:

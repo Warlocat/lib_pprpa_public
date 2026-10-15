@@ -22,24 +22,24 @@ from gpu4pyscf.pbc import tools as gtools
 from gpu4pyscf.lib.cupy_helper import contract
 
 from lib_pprpa.gpu_coulomb import ao_loop, coulomb_potential, half_kernel, mo_on_grid
-from lib_pprpa.gpu_mem import free_bytes, max_fft_batch
+from lib_pprpa.gpu_mem import free_bytes, max_fft_batch, plan_budget
 
 __all__ = ['get_k_lowrank', 'pair_get_k_lowrank']
 
 # Bytes per (codensity, grid point) in one FFT batch: rho, half spectrum, real
 # potential, the cuFFT work area and the contraction with phiL.
 _FFT_BYTES = 48
-_FFT_BUDGET_FRAC = 0.3
 
 
 def _fft_batch(free, ngrid, mesh, r, nk):
-    '''(ket rows, codensities per row) of one FFT batch within ``free`` bytes.
+    '''(ket rows, codensities per row) of one FFT batch in the ``free`` bytes left
+    beside the resident grids and U, after the workspace reserve.
 
     Whole rows of r codensities while one fits; below that one row is split
     into codensity chunks, since a single row alone is r * ngrid * _FFT_BYTES.
     '''
-    nb = int(_FFT_BUDGET_FRAC * free) // (_FFT_BYTES * ngrid)
-    nb = max(1, min(nb, max_fft_batch(ngrid, mesh)))
+    nb = plan_budget(free) // (_FFT_BYTES * ngrid)
+    nb = max(1, min(nb, max_fft_batch(ngrid)))
     return max(1, min(nk, nb // r)), min(r, nb)
 
 
@@ -67,22 +67,32 @@ def get_k_lowrank(cell, mesh, factors, ket=None, verbose=None):
         r = phiL.shape[0]
         U = cp.empty((nk, ngrid))
         kb, mb = _fft_batch(free_bytes(), ngrid, mesh, r, nk)
+        # equal-width codensity windows, so every batch of a ket block has one shape and
+        # coulomb_potential keeps its cuFFT plans (a short last chunk would rebuild them
+        # twice per block); the last window ends at r and zeroes the rows already done
+        nm = -(-r // mb)
+        mb = -(-r // nm)
         log.debug('low-rank exchange: %d ket rows x %d of %d codensities per FFT batch', kb, mb, r)
         for k0, k1 in lib.prange(0, nk, kb):
-            for m0, m1 in lib.prange(0, r, mb):
-                rho = (phiR[m0:m1][None] * phiK[k0:k1, None]).reshape(-1, ngrid)
-                vR = coulomb_potential(rho, mesh, w_half).reshape(k1 - k0, m1 - m0, ngrid)
+            for c in range(nm):
+                m0 = min(c * mb, r - mb)
+                m1 = m0 + mb
+                rho = phiR[m0:m1][None] * phiK[k0:k1, None]
+                if m0 < c * mb:
+                    rho[:, :c * mb - m0] = 0.0          # zero codensity -> zero potential
+                rho = rho.reshape(-1, ngrid)
+                vR = coulomb_potential(rho, mesh, w_half).reshape(k1 - k0, mb, ngrid)
                 rho = None
                 Um = contract('mg,kmg->kg', phiL[m0:m1], vR)
                 vR = None
-                if m0 == 0:
+                if c == 0:
                     U[k0:k1] = Um
                 else:
                     U[k0:k1] += Um
                 Um = None
         phiL = phiR = None
         K = cp.zeros((nao, nk))
-        for g0, g1, aoT in ao_loop(cell, mesh):
+        for g0, g1, aoT in ao_loop(cell, mesh, extra_per_point=8 * nk):   # U[:, g0:g1] copy
             K += aoT @ U[:, g0:g1].T
         out[iset] = (K * (cell.vol / ngrid)).get()
         U = K = None
