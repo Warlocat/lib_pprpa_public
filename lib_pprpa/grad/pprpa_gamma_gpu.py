@@ -162,7 +162,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     P_mo, W_mo = make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
         cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
-        pair_get_k=pair_get_k_lowrank(cell, mf, orbp),
+        pair_get_k=pair_get_k_lowrank(cell, mf, orbp, devices=pprpa_grad.devices),
         cphf_x0=pprpa_grad.cphf_x0, cphf_x0_out=cphf_out)
     pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
     W = mo @ W_mo @ mo.T \
@@ -265,6 +265,9 @@ class Gradients(_cpu.Gradients):
         # AO-basis CPHF solution of the previous evaluation, used as the
         # initial guess for the next one.  See make_rdm1_relaxed_rhf_pprpa.
         self.cphf_x0 = None
+        # CUDA devices the 2-RDM exchange is dispatched over; None is the
+        # current device.
+        self.devices = None
 
     def grad_elec(self, xy, mult, atmlst):
         return grad_elec(self, xy, mult, atmlst)

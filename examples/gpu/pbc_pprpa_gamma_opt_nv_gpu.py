@@ -70,6 +70,8 @@ PSEUDO  = "gth-pbe"
 NROOT   = max(5, ISTATE + 1)
 GAMMA   = np.zeros((1, 3))      # pp-RPA is Gamma-point only
 CHK, RESTART, TRAJ = "scf.chk", "bfgs.pkl", "opt.traj"
+DEVICES = None                  # e.g. [0, 1]: dispatch ao2mo, the Davidson ERIs and the
+                                # 2-RDM exchange over these CUDA devices (default: current)
 _state = {"cphf_x0": None}      # CPHF warm start between geometry steps
 
 # read geometry + lattice from the input file (POSCAR or xyz), or resume
@@ -144,12 +146,13 @@ def _pipeline(cell, want_grad):
     # GPU FFT ao2mo (active-space MO ERI) + GPU batched use_eri Davidson
     cocc = mo[:, nfo:nfo + nocc]
     cvir = mo[:, nfo + nocc:nfo + nocc + nvir]
-    vvvv, oovv, oooo = gpu_ao2mo_blocks(cell, cocc, cvir, cell.mesh, return_gpu=True)
+    vvvv, oovv, oooo = gpu_ao2mo_blocks(cell, cocc, cvir, cell.mesh, return_gpu=True,
+                                        devices=DEVICES)
     mp = ppRPA_Davidson(nocc, moe[nfo:nfo + nact], Lpq=None, channel=CHANNEL,
                         nroot=NROOT, residue_thresh=1e-9, trial="identity")
     mp.mu = 0.0
     mp.max_vec = 1000
-    attach_gpu_eri_contraction(mp, vvvv, oovv, oooo)
+    attach_gpu_eri_contraction(mp, vvvv, oovv, oooo, devices=DEVICES)
     mp.kernel(MULT)
 
     exci = (mp.exci_s if MULT == "s" else mp.exci_t)[ISTATE]
@@ -167,6 +170,7 @@ def _pipeline(cell, want_grad):
     g.cphf_max_cycle = 100
     g.cphf_conv_tol = 1e-7
     g.cphf_x0 = _state["cphf_x0"]
+    g.devices = DEVICES
     de = g.grad_elec(xy, MULT, range(_NATM)) + g.grad_nuc()
     _state["cphf_x0"] = g.cphf_x0
     cp.get_default_memory_pool().free_all_blocks()
