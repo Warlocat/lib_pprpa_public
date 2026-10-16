@@ -45,6 +45,7 @@ from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
+from lib_pprpa.gpu_emulation import emulation_available, fp64_emulation
 from lib_pprpa.gpu_fft_k import pair_get_k_lowrank
 from lib_pprpa.gpu_pairing_force import pairing_k_force_lowrank
 from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
@@ -58,13 +59,15 @@ def _aftdf(cell, kpts):
     return adf
 
 
-def make_gpu_vresp(cell, mf, gpu_mf=None):
+def make_gpu_vresp(cell, mf, gpu_mf=None, emulate=True):
     """Native GPU CPHF response (``singlet=None, hermi=1``) for Gamma KS.
 
     The native ``KRKS.gen_response`` object caches the XC kernel once and then
     applies ``J + fxc`` (and the hybrid exchange response) throughout the CPHF
     solve.  This adapter only adds/removes the Gamma k-point axes and converts
-    between the CPU CPHF solver's NumPy arrays and CuPy.
+    between the CPU CPHF solver's NumPy arrays and CuPy.  With ``emulate`` the
+    response runs under cuBLAS's ``performant`` fp64 emulation where the device
+    gains from it (``gpu_emulation``).
     """
     from gpu4pyscf.pbc import dft as gdft
 
@@ -107,6 +110,7 @@ def make_gpu_vresp(cell, mf, gpu_mf=None):
 
     native_vresp = kmf.gen_response(singlet=None, hermi=1)
     nao = cell.nao
+    strategy = 'performant' if emulate and emulation_available('performant') else None
 
     def vresp(dm):
         # Return CuPy when handed CuPy so a device-resident CPHF loop can avoid
@@ -117,7 +121,8 @@ def make_gpu_vresp(cell, mf, gpu_mf=None):
         if dmg.shape != (nao, nao):
             raise ValueError(
                 f"Gamma CPHF response expects ({nao}, {nao}); got {dmg.shape}")
-        v = native_vresp(dmg.reshape(1, 1, nao, nao))
+        with fp64_emulation(strategy):
+            v = native_vresp(dmg.reshape(1, 1, nao, nao))
         return v[0, 0] if want_device else cp.asnumpy(v[0, 0])
 
     vresp.accepts_device_arrays = True
@@ -162,7 +167,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     P_mo, W_mo = make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
         cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
-        pair_get_k=pair_get_k_lowrank(cell, mf, orbp),
+        pair_get_k=pair_get_k_lowrank(cell, mf, orbp, devices=pprpa_grad.devices),
         cphf_x0=pprpa_grad.cphf_x0, cphf_x0_out=cphf_out)
     pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
     W = mo @ W_mo @ mo.T \
@@ -265,6 +270,9 @@ class Gradients(_cpu.Gradients):
         # AO-basis CPHF solution of the previous evaluation, used as the
         # initial guess for the next one.  See make_rdm1_relaxed_rhf_pprpa.
         self.cphf_x0 = None
+        # CUDA devices the 2-RDM exchange is dispatched over; None is the
+        # current device.
+        self.devices = None
 
     def grad_elec(self, xy, mult, atmlst):
         return grad_elec(self, xy, mult, atmlst)

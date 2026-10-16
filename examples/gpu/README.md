@@ -80,15 +80,16 @@ on the GPU — about 4 orders of magnitude faster per Davidson solve (≈0.3 s v
 
 1. **Two extra lib_pprpa modules** (now shipped in the package):
    - `lib_pprpa.gpu_ao2mo` — `gpu_ao2mo_blocks(cell, cocc, cvir, mesh, …)` builds the
-     active-space `vvvv` / `oovv` / `oooo` blocks via GPU FFT ao2mo (mirrors PySCF's
-     `_contract_compact` in real space; validated to ~1e-13 vs CPU reference).
+     active-space `vvvv` / `oovv` / `oooo` blocks via GPU FFT ao2mo as packed pair
+     Gram matrices (the lower triangle of `(pq|rs)` over `p >= q` pairs; 8x smaller
+     than the physicist `vvvv`, 2x for `oovv`), assembled in pinned host memory.
    - `lib_pprpa.pprpa_eri_gpu` — `attach_gpu_eri_contraction(mp, vvvv, oovv, oooo)`
-     swaps the Davidson matvec to a batched `use_eri` GPU contraction.
-2. **Memory at scale.** The three active-space ERI blocks stay on the device
-   when they fit 75% of its memory and are otherwise assembled in pinned host
-   memory and streamed per Davidson iteration; the 216-atom NV cell at AS=300
-   (194 GB of ERIs) runs on one 183 GB B200 that way and needs about 400 GB of
-   host memory.
+     swaps the Davidson matvec to GEMMs with the pp-RPA pair-space operator, built
+     from the Gram blocks at the first product (or straight from ao2mo with
+     `gpu_ao2mo_pair_operator(..., multi)`); `pack_eri` converts physicist tensors.
+2. **Memory at scale.** The packed blocks stay on the device when they fit 75%
+   of its memory and are otherwise streamed in row chunks per Davidson iteration;
+   the 216-atom NV cell at AS=300 (49 GB packed) is resident on one H200 or B200.
 3. **A geometry file** (POSCAR/`.vasp` or `.xyz`) — read via ASE; the lattice is
    taken from it and held fixed during the relaxation.
 4. **Enough GPU memory.** The peak is the FFT ao2mo, not the stored ERIs: the
@@ -111,6 +112,32 @@ of the script — edit there for a different defect or charge state.
   with `PYTHONPATH=~/project/gpu4pyscf:~/project/pyscf:~/project/lib_pprpa_public`
   and `CUPY_ACCELERATORS=cutensor,cub`.
 - Run on a GPU node (login nodes have no GPU).
+
+### CUDA 13 venv (fp64 emulation on Blackwell)
+The MO-eri path runs its widest DGEMMs (the ao2mo tiles, and the CPHF response
+on Blackwell) as cuBLAS fp64 emulation where it is faster (`lib_pprpa.gpu_emulation`;
+on by default through `emulate=True` in `gpu_ao2mo_blocks` and `make_gpu_vresp`).
+That needs cuBLAS 13, but `module load` on Bouchet only offers CUDA up to
+`CUDA/12.9.1`, so build a venv from the pip CUDA 13 wheels instead; they ship
+their own CUDA libraries, so no CUDA module is needed at run time:
+```bash
+uv venv --python 3.10 ~/venv_cu13
+uv pip install --python ~/venv_cu13/bin/python \
+    cupy-cuda13x==14.2.0 gpu4pyscf-cuda13x==1.8.1 gpu4pyscf-libxc-cuda13x==0.8.1 \
+    pyscf==2.14.0 ase cutensor-cu13 \
+    nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-nvjitlink \
+    nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse
+uv pip install --python ~/venv_cu13/bin/python --no-deps -e /path/to/lib_pprpa
+export LD_LIBRARY_PATH=~/venv_cu13/lib/python3.10/site-packages/cutensor/lib:$LD_LIBRARY_PATH
+```
+- List the `nvidia-*` runtime wheels explicitly: installing only cupy and
+  gpu4pyscf leaves out cuSOLVER and nvJitLink, `import gpu4pyscf` fails, and
+  pytest then skips every GPU test.
+- Do not set `CUBLAS_EMULATE_DOUBLE_PRECISION`: it emulates every DGEMM in the
+  process and slows the SCF and CPHF.  Leave `CUPY_ACCELERATORS` unset as well
+  (cuTENSOR 2.8.1 rejects a strided accumulate in `gpu_pairing_force`).
+- Under CUDA 12 the switch is a no-op, so the same code runs in either venv.
+  Hopper gains only on very wide tiles; Blackwell gains from ~800-pair strips up.
 
 ## Scope / notes
 - Gamma point, RKS/RHF reference, LDA/GGA/hybrid functionals.
