@@ -29,6 +29,9 @@ _GRID_BLK_MIN = 4096
 # its output included: 8.0 for deriv 0 and 1 (NV63 dzvp, nao 819, H200) -- the
 # output alone, no transient.
 _AO_BYTES = 8
+# Device threads (gpu_multi) take turns on the AO-grid passes: run on two devices
+# at once, mo_on_grid returned wrong MO grids (1e-4 to 1e-1 in the exchange).
+_AO_GRID_LOCK = threading.RLock()
 # batch shape whose cuFFT plans this thread's plan cache holds (coulomb_potential)
 _PLAN_SHAPE = threading.local()
 
@@ -50,21 +53,27 @@ def ao_loop(cell, mesh, deriv=0, extra_per_point=0, blksize=None):
         blksize = plan_budget(free_bytes()) // (2 * (_AO_BYTES * ncomp * cell.nao
                                                       + int(extra_per_point)))
     blksize = max(1, min(ngrid, max(_GRID_BLK_MIN, blksize)))
-    for g0, g1 in lib.prange(0, ngrid, blksize):
-        ao = cp.asarray(gnumint.eval_ao_kpts(cell, coords[g0:g1], kpts=_KPTS0, deriv=deriv)[0])
-        yield g0, g1, (ao.T if deriv == 0 else ao)
+    with _AO_GRID_LOCK:
+        try:
+            for g0, g1 in lib.prange(0, ngrid, blksize):
+                ao = cp.asarray(
+                    gnumint.eval_ao_kpts(cell, coords[g0:g1], kpts=_KPTS0, deriv=deriv)[0])
+                yield g0, g1, (ao.T if deriv == 0 else ao)
+        finally:
+            cp.cuda.Device().synchronize()
 
 
 def mo_on_grid(cell, mo_coeffs, mesh, blksize=None):
     '''MO values on the uniform grid, one (nmo, ngrid) CuPy array per coefficient set;
     one AO evaluation serves every set.'''
     ngrid = int(np.prod(mesh))
-    mos = [cp.asarray(m, dtype=np.float64) for m in mo_coeffs]
-    outs = [cp.empty((m.shape[1], ngrid)) for m in mos]
-    extra = 8 * sum(m.shape[1] for m in mos)
-    for g0, g1, aoT in ao_loop(cell, mesh, extra_per_point=extra, blksize=blksize):
-        for out, m in zip(outs, mos):
-            out[:, g0:g1] = m.T @ aoT
+    with _AO_GRID_LOCK:
+        mos = [cp.asarray(m, dtype=np.float64) for m in mo_coeffs]
+        outs = [cp.empty((m.shape[1], ngrid)) for m in mos]
+        extra = 8 * sum(m.shape[1] for m in mos)
+        for g0, g1, aoT in ao_loop(cell, mesh, extra_per_point=extra, blksize=blksize):
+            for out, m in zip(outs, mos):
+                out[:, g0:g1] = m.T @ aoT
     return outs
 
 
