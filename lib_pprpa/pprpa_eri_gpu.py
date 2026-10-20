@@ -180,6 +180,7 @@ def attach_gpu_eri_contraction(pprpa, *eri, mode="auto", rows=None, devices=None
     pprpa.oovv = None
     pprpa.oooo = None
     pprpa.contraction = lambda tri_vec: _contraction(pprpa, tri_vec)
+    pprpa.eri_nbytes = lambda: _eri_nbytes(pprpa)
     log.info("GPU pair operator: mode=%s devices=%s operator=%.2f GB%s nocc=%d nvir=%d",
              mode, devices, need / 1e9, f" ({multi})" if pre else " (singlet, from Gram)",
              nocc, nvir)
@@ -191,6 +192,7 @@ def release_gpu_eri(pprpa):
     the cupy pools; the solver keeps its eigenvalues and eigenvectors."""
     op = pprpa.__dict__.pop("_gpu_eri", None)
     pprpa.__dict__.pop("contraction", None)
+    pprpa.__dict__.pop("eri_nbytes", None)
     if op is not None:
         devices = op["devices"]
         op.clear()
@@ -387,6 +389,19 @@ def _build(op, nocc, nvir):
     op["log"].timer("pair operator placement" if pre is not None else "pair operator build", *t0)
     op["log"].info("GPU pair operator (%s, %s): %d strips, %.2f GB", multi, mode, len(flat),
                    sum(strip[3].nbytes for strip in flat) / 1e9)
+
+
+def _eri_nbytes(pprpa):
+    """Bytes of the operator strips for the solver's multiplicity, plus the Gram blocks
+    they are converted from while those are held (until the first product)."""
+    op = pprpa._gpu_eri
+    if op["strips"] is not None:
+        flat = sum(op["strips"], []) if op["mode"] == "split" else op["strips"]
+        return sum(S.nbytes for *_, S in flat)
+    if op["prebuilt"] is not None:
+        return op["prebuilt"].nbytes
+    plan = _strips(pprpa.nocc, pprpa.nvir, pprpa.multi, op["rows"])
+    return sum(s[-1] for s in plan) + sum(b.nbytes for b in op["blocks"].values())
 
 
 def _apply(strips, X, Y, noo):

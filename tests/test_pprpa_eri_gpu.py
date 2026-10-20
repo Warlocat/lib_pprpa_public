@@ -121,6 +121,7 @@ def test_mvp_matches_cpu(multi, ntri):
     moe = rng.standard_normal(nocc + nvir)
     vvvv, oovv, oooo = _random_eri(rng, nocc, nvir)
     cpu = _solver(nocc, moe, multi, eri=(vvvv, oovv, oooo))
+    assert cpu.eri_nbytes() == 8 * (nocc**4 + nvir**4 + nocc**2 * nvir**2)
     tv = rng.standard_normal((ntri, cpu.full_dim))
     ref = _pprpa_contraction(cpu, tv)
     packed = pack_eri(vvvv, oovv, oooo)
@@ -132,6 +133,7 @@ def test_mvp_matches_cpu(multi, ntri):
             np.testing.assert_allclose(gpu.contraction(tv), ref, rtol=1e-11, atol=1e-11)
             release_gpu_eri(gpu)
             assert not hasattr(gpu, "_gpu_eri") and "contraction" not in gpu.__dict__
+            assert "eri_nbytes" not in gpu.__dict__
 
 
 @needs_gpu
@@ -142,12 +144,17 @@ def test_operator_is_built_for_one_multiplicity():
     nocc, nvir = 4, 5
     moe = rng.standard_normal(nocc + nvir)
     gpu = _solver(nocc, moe, "s")
-    attach_gpu_eri_contraction(gpu, *pack_eri(*_random_eri(rng, nocc, nvir)))
+    packed = pack_eri(*_random_eri(rng, nocc, nvir))
+    attach_gpu_eri_contraction(gpu, *packed)
     assert gpu._gpu_eri["mode"] == "resident"
+    before = gpu.eri_nbytes()
     gpu.contraction(rng.standard_normal((2, gpu.full_dim)))
     op = gpu._gpu_eri
     assert op["multi"] == "s" and op["blocks"] is None
     assert all(isinstance(s[3], cp.ndarray) for s in op["strips"])
+    # the Gram blocks are counted until the first product converts them
+    assert gpu.eri_nbytes() == sum(s[3].nbytes for s in op["strips"])
+    assert before == gpu.eri_nbytes() + sum(b.nbytes for b in packed)
     gpu.multi = "t"
     gpu.check_parameter()
     with pytest.raises(ValueError):
@@ -200,6 +207,7 @@ def test_fused_ao2mo_operator_matches_cpu(multi, pair_blk, devices):
     for mode, devs in (("resident", None), ("streamed", None), ("split", [0, 0])):
         gpu = _solver(nocc, moe, multi)
         attach_gpu_eri_contraction(gpu, op, mode=mode, devices=devs)
+        assert gpu.eri_nbytes() == op.nbytes
         # ao2mo sums the 8000-point grid in a different order than pyscf (~5e-11 per element)
         np.testing.assert_allclose(gpu.contraction(tv), expect, rtol=1e-9, atol=1e-9)
         release_gpu_eri(gpu)
