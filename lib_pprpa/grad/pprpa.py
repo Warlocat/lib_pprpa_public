@@ -1,5 +1,6 @@
 import numpy as np
 from functools import reduce
+from scipy.linalg import block_diag
 from pyscf import lib, scf
 from pyscf.df.df_jk import _DFHF
 from pyscf.lib import logger
@@ -197,7 +198,7 @@ def make_rdm1_relaxed_rhf_pprpa(
     assert mult in ['t', 's'], 'mult = {}. is not valid in make_rdm1_relaxed_pprpa'.format(mult)
     from lib_pprpa import pyscf_util
     from lib_pprpa.grad.grad_utils import choose_slice, choose_range, contraction_2rdm_Lpq, \
-                           contraction_2rdm_eri, get_xy_full, make_rdm1_unrelaxed_from_xy_full
+                           contraction_2rdm_eri, get_xy_full
 
     if xy is None:
         if mult == 's':
@@ -274,8 +275,15 @@ def make_rdm1_relaxed_rhf_pprpa(
     # set singlet=None, generate function for CPHF type response kernel
     if vresp is None:
         vresp = mf.gen_response(singlet=None, hermi=1)
-    den_u = make_rdm1_unrelaxed_from_xy_full(occ_y_mat, vir_x_mat)
-    den_u_ao = lib.einsum('pi,i,qi->pq', orbp, den_u, orbp, optimize=True)
+    # D' below carries the off-diagonal unrelaxed density of every orbital pair except the
+    # degenerate ones, where it is zeroed; those elements (nonzero for a degenerate state) are
+    # kept in den_u, which is the diagonal plus the degenerate blocks.
+    threshold = 1.0e-6
+    e_act = mo_ene_full[slice_p]
+    degenerate = abs(e_act[:, None] - e_act[None, :]) < threshold
+    den_u = block_diag(-occ_y_mat @ occ_y_mat.conj().T, vir_x_mat @ vir_x_mat.conj().T)
+    den_u[~degenerate] = 0
+    den_u_ao = reduce(np.dot, (orbp, den_u, orbp.T))
     veff_den_u = reduce(np.dot, (mf.mo_coeff.T, vresp(den_u_ao) * 2, mf.mo_coeff))
 
     start_clock('Calculate i_prime and i_prime_prime')
@@ -291,8 +299,7 @@ def make_rdm1_relaxed_rhf_pprpa(
             occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
         )
     i_prime[slice_a, slice_i] += veff_den_u[slice_a, slice_i]
-    for p in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
-        i_prime[p, p] += mo_ene_full[p] * den_u[p - nfrozen_occ]
+    i_prime[slice_p, slice_p] += e_act[:, None] * den_u
 
     if nfrozen_vir > 0:
         # I' frozen virtual-active block
@@ -330,7 +337,6 @@ def make_rdm1_relaxed_rhf_pprpa(
 
     start_clock('Calculate d_prime')
     d_prime = np.zeros_like(i_prime_prime)
-    threshold = 1.0e-6
     # D' all occupied-active occupied block
     for i in choose_range('I', nfrozen_occ, nocc, nvir, nfrozen_vir):
         for j in choose_range('i', nfrozen_occ, nocc, nvir, nfrozen_vir):
@@ -438,8 +444,7 @@ def make_rdm1_relaxed_rhf_pprpa(
 
     den_relaxed = d_prime
     # active-active block
-    for p in choose_range('p', nfrozen_occ, nocc, nvir, nfrozen_vir):
-        den_relaxed[p, p] += 0.5 * den_u[p - nfrozen_occ]
+    den_relaxed[slice_p, slice_p] += 0.5 * den_u
     den_relaxed = den_relaxed + den_relaxed.T
     i_int = i_int + i_int.T
 
