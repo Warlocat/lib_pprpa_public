@@ -17,7 +17,6 @@ def _pprpa_contraction(pprpa, tri_vec):
     nocc, nvir, nmo = pprpa.nocc, pprpa.nvir, pprpa.nmo
     naux = pprpa.naux
     mo_energy = pprpa.mo_energy
-    Lpq = pprpa.Lpq
     Lpi = pprpa.Lpi
     Lpa = pprpa.Lpa
 
@@ -39,30 +38,18 @@ def _pprpa_contraction(pprpa, tri_vec):
 
         # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
         Lpq_z = np.zeros(shape=[naux*nmo, nmo], dtype=tri_vec.dtype)
-        if pprpa._use_Lov:
-            Lpq_z[:, :nocc] = np.matmul(Lpi.reshape(naux * nmo, nocc), z_oo)
-            Lpq_z[:, nocc:] = np.matmul(Lpa.reshape(naux * nmo, nvir), z_vv)
-        else:
-            Lpq_z[:, :nocc] = np.matmul(
-                Lpq[:, :, :nocc].reshape(naux * nmo, nocc), z_oo)
-            Lpq_z[:, nocc:] = np.matmul(
-                Lpq[:, :, nocc:].reshape(naux * nmo, nvir), z_vv)
+        Lpq_z[:, :nocc] = np.matmul(Lpi.reshape(naux * nmo, nocc), z_oo)
+        Lpq_z[:, nocc:] = np.matmul(Lpa.reshape(naux * nmo, nvir), z_vv)
         Lpq_z = Lpq_z.reshape(naux, nmo, nmo)
 
         # MV_{pq} = \sum_{Lr} Lpq_{L,pr} Lpqz_{L,qr} - Lpq_{L,qr} Lpqz_{L,pr}
         # -MV_{qp}* = - \sum_{Lr} Lpq_{L,rp} Lpqz_{L,qr}^* + Lpq_{L,rq} Lpqz_{L,pr}^*
         Lpq_z = Lpq_z.transpose(1, 0, 2).conj()
         Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
-        if pprpa._use_Lov:
-            prod_oo = np.matmul(Lpq_z[:nocc], Lpi.reshape(naux * nmo, nocc))
-            prod_oo -= prod_oo.T
-            prod_vv = np.matmul(Lpq_z[nocc:], Lpa.reshape(naux * nmo, nvir))
-            prod_vv -= prod_vv.T
-        else:
-            prod_oo = np.matmul(Lpq_z[:nocc], Lpq[:, :, :nocc].reshape(naux * nmo, nocc))
-            prod_oo -= prod_oo.T
-            prod_vv = np.matmul(Lpq_z[nocc:], Lpq[:, :, nocc:].reshape(naux * nmo, nvir))
-            prod_vv -= prod_vv.T
+        prod_oo = np.matmul(Lpq_z[:nocc], Lpi.reshape(naux * nmo, nocc))
+        prod_oo -= prod_oo.T
+        prod_vv = np.matmul(Lpq_z[nocc:], Lpa.reshape(naux * nmo, nvir))
+        prod_vv -= prod_vv.T
         prod_oo[np.diag_indices(nocc)] *= 1.0 / np.sqrt(2)
         prod_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
         mv_prod[ivec][: pprpa.oo_dim] =\
@@ -177,6 +164,8 @@ class GppRPA_Davidson(pprpa_davidson.ppRPA_Davidson):
         # This is not really for triplet, just for implementation purpose.
         # GHF-ppRPA shares the same equation with ppRPA triplet.
         self.multi = "t"
+        self.Lpi = None  # Lpq[:, :, :nocc]
+        self.Lpa = None  # Lpq[:, :, nocc:]
         return
     
     def check_memory(self):
@@ -184,7 +173,7 @@ class GppRPA_Davidson(pprpa_davidson.ppRPA_Davidson):
         mem = (
             self.naux * self.nmo * self.nmo + 3 * self.max_vec * self.full_dim)\
                 * 8 / 1.0e6
-        if self.Lpq.dtype == np.complex128:
+        if self.Lpi.dtype == np.complex128:
             mem *= 2
         if mem < 1000:
             print("GppRPA needs at least %d MB memory." % mem)
@@ -195,11 +184,15 @@ class GppRPA_Davidson(pprpa_davidson.ppRPA_Davidson):
     def kernel(self):
         self.check_parameter()
 
-        # TODO: directly take Lpi and Lpa in the future
-        if self._use_Lov is True and self.Lpq is not None:
+        if self.Lpi is None or self.Lpa is None:
             self.Lpi = np.ascontiguousarray(self.Lpq[:, :, :self.nocc])
             self.Lpa = np.ascontiguousarray(self.Lpq[:, :, self.nocc:])
             self.Lpq = None
+        # views read by the shared kernel (dtype) and the subspace trial vectors
+        self.Loo = self.Lpi[:, :self.nocc]
+        self.Lvo = self.Lpi[:, self.nocc:]
+        self.Lov = self.Lpa[:, :self.nocc]
+        self.Lvv = self.Lpa[:, self.nocc:]
 
         self.dump_flags()
         self.check_memory()
