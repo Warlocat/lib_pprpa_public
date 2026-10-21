@@ -1147,9 +1147,7 @@ class ppRPA_Davidson():
     def check_memory(self):
         # intermediate in contraction; mv_prod, tri_vec, xy
         if self._use_eri:
-            mem = (self.nocc**4 + self.nvir**4 + self.nocc**2 * self.nvir**2 + \
-                3 * self.max_vec * self.full_dim)\
-                * 8 / 1.0e6
+            mem = (self.eri_nbytes() + 3 * self.max_vec * self.full_dim * 8) / 1.0e6
         elif self._ao_direct:
             mem = (3 * self.max_vec * self.full_dim)\
                 * 8 / 1.0e6
@@ -1307,3 +1305,7 @@ class ppRPA_Davidson():
 
     def contraction(self, tri_vec):
         return _pprpa_contraction(self, tri_vec)
+
+    def eri_nbytes(self):
+        """Bytes of the ERIs that contraction reads (use_eri)."""
+        return self.vvvv.nbytes + self.oovv.nbytes + self.oooo.nbytes
