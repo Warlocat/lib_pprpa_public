@@ -45,6 +45,7 @@ from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
+from lib_pprpa.gpu_emulation import emulation_available, fp64_emulation
 from lib_pprpa.gpu_fft_k import pair_get_k_lowrank
 from lib_pprpa.gpu_pairing_force import pairing_k_force_lowrank
 from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
@@ -58,13 +59,15 @@ def _aftdf(cell, kpts):
     return adf
 
 
-def make_gpu_vresp(cell, mf, gpu_mf=None):
+def make_gpu_vresp(cell, mf, gpu_mf=None, emulate=True):
     """Native GPU CPHF response (``singlet=None, hermi=1``) for Gamma KS.
 
     The native ``KRKS.gen_response`` object caches the XC kernel once and then
     applies ``J + fxc`` (and the hybrid exchange response) throughout the CPHF
     solve.  This adapter only adds/removes the Gamma k-point axes and converts
-    between the CPU CPHF solver's NumPy arrays and CuPy.
+    between the CPU CPHF solver's NumPy arrays and CuPy.  With ``emulate`` the
+    response runs under cuBLAS's ``performant`` fp64 emulation where the device
+    gains from it (``gpu_emulation``).
     """
     from gpu4pyscf.pbc import dft as gdft
 
@@ -107,6 +110,7 @@ def make_gpu_vresp(cell, mf, gpu_mf=None):
 
     native_vresp = kmf.gen_response(singlet=None, hermi=1)
     nao = cell.nao
+    strategy = 'performant' if emulate and emulation_available('performant') else None
 
     def vresp(dm):
         # Return CuPy when handed CuPy so a device-resident CPHF loop can avoid
@@ -117,7 +121,8 @@ def make_gpu_vresp(cell, mf, gpu_mf=None):
         if dmg.shape != (nao, nao):
             raise ValueError(
                 f"Gamma CPHF response expects ({nao}, {nao}); got {dmg.shape}")
-        v = native_vresp(dmg.reshape(1, 1, nao, nao))
+        with fp64_emulation(strategy):
+            v = native_vresp(dmg.reshape(1, 1, nao, nao))
         return v[0, 0] if want_device else cp.asnumpy(v[0, 0])
 
     vresp.accepts_device_arrays = True

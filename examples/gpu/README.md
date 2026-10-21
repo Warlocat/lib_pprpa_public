@@ -113,6 +113,32 @@ of the script — edit there for a different defect or charge state.
   and `CUPY_ACCELERATORS=cutensor,cub`.
 - Run on a GPU node (login nodes have no GPU).
 
+### CUDA 13 venv (fp64 emulation on Blackwell)
+The MO-eri path runs its widest DGEMMs (the ao2mo tiles, and the CPHF response
+on Blackwell) as cuBLAS fp64 emulation where it is faster (`lib_pprpa.gpu_emulation`;
+on by default through `emulate=True` in `gpu_ao2mo_blocks` and `make_gpu_vresp`).
+That needs cuBLAS 13, but `module load` on Bouchet only offers CUDA up to
+`CUDA/12.9.1`, so build a venv from the pip CUDA 13 wheels instead; they ship
+their own CUDA libraries, so no CUDA module is needed at run time:
+```bash
+uv venv --python 3.10 ~/venv_cu13
+uv pip install --python ~/venv_cu13/bin/python \
+    cupy-cuda13x==14.2.0 gpu4pyscf-cuda13x==1.8.1 gpu4pyscf-libxc-cuda13x==0.8.1 \
+    pyscf==2.14.0 ase cutensor-cu13 \
+    nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-nvjitlink \
+    nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse
+uv pip install --python ~/venv_cu13/bin/python --no-deps -e /path/to/lib_pprpa
+export LD_LIBRARY_PATH=~/venv_cu13/lib/python3.10/site-packages/cutensor/lib:$LD_LIBRARY_PATH
+```
+- List the `nvidia-*` runtime wheels explicitly: installing only cupy and
+  gpu4pyscf leaves out cuSOLVER and nvJitLink, `import gpu4pyscf` fails, and
+  pytest then skips every GPU test.
+- Do not set `CUBLAS_EMULATE_DOUBLE_PRECISION`: it emulates every DGEMM in the
+  process and slows the SCF and CPHF.  Leave `CUPY_ACCELERATORS` unset as well
+  (cuTENSOR 2.8.1 rejects a strided accumulate in `gpu_pairing_force`).
+- Under CUDA 12 the switch is a no-op, so the same code runs in either venv.
+  Hopper gains only on very wide tiles; Blackwell gains from ~800-pair strips up.
+
 ## Scope / notes
 - Gamma point, RKS/RHF reference, LDA/GGA/hybrid functionals.
 - The RKS CPHF/Z-vector solve uses native
