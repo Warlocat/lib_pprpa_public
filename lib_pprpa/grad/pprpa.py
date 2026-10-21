@@ -281,7 +281,7 @@ def make_rdm1_relaxed_rhf_pprpa(
     threshold = 1.0e-6
     e_act = mo_ene_full[slice_p]
     degenerate = abs(e_act[:, None] - e_act[None, :]) < threshold
-    den_u = block_diag(-occ_y_mat.conj() @ occ_y_mat.T, vir_x_mat @ vir_x_mat.conj().T)
+    den_u = block_diag(-occ_y_mat @ occ_y_mat.conj().T, vir_x_mat @ vir_x_mat.conj().T)
     den_u[~degenerate] = 0
     den_u_ao = reduce(np.dot, (orbp, den_u, orbp.T))
     veff_den_u = reduce(np.dot, (mf.mo_coeff.T, vresp(den_u_ao) * 2, mf.mo_coeff))
