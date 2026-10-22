@@ -40,13 +40,13 @@ import numpy as np
 import cupy as cp
 from scipy.linalg import block_diag
 
-from pyscf import lib
 from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
 from lib_pprpa.gpu_emulation import emulation_available, fp64_emulation
 from lib_pprpa.gpu_fft_k import pair_get_k_lowrank
+from lib_pprpa.gpu_mem import pooled
 from lib_pprpa.gpu_pairing_force import pairing_k_force_lowrank
 from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
 
@@ -211,9 +211,11 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         kf = (gdft.KRKS(cell, kpts=kpts, xc=mf.xc) if is_ks
               else gscf.KRHF(cell, kpts=kpts))
         kf.exxdiv = mf.exxdiv
-        kf.mo_coeff = kmf.mo_coeff; kf.mo_energy = kmf.mo_energy
+        kf.mo_coeff = kmf.mo_coeff
+        kf.mo_energy = kmf.mo_energy
         kf.mo_occ = kmf.mo_occ
-        kf.with_df = _aftdf(cell, kpts); kf.rsjk = None
+        kf.with_df = _aftdf(cell, kpts)
+        kf.rsjk = None
         return kf
 
     Dg, Pg, Tg, Wg = (cp.asarray(a) for a in (D, P, T, W))
@@ -275,7 +277,10 @@ class Gradients(_cpu.Gradients):
         self.devices = None
 
     def grad_elec(self, xy, mult, atmlst):
-        return grad_elec(self, xy, mult, atmlst)
+        # the grid passes (CPHF response, hcore, Vxc) and the FFT batches allocate blocks
+        # over gpu4pyscf's cudaMalloc threshold every iteration: pool them
+        with pooled():
+            return grad_elec(self, xy, mult, atmlst)
 
 
 Grad = Gradients
