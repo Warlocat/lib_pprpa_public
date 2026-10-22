@@ -58,7 +58,6 @@ def diamond():
 
 def test_ao2mo_two_workers_match_one(diamond):
     from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
-    from lib_pprpa.gpu_mem import is_pinned
     cell, mf = diamond
     nocc = cell.nelectron // 2
     cocc, cvir = mf.mo_coeff[:, :nocc], mf.mo_coeff[:, nocc:]
