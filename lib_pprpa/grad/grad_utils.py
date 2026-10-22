@@ -1165,7 +1165,7 @@ def make_rdm1_relaxed_pprpa(pprpa, mf, xy=None, mult='t', istate=0):
             else:
                 xy = pprpa.xy_t[istate]
         nocc_all = mf.mol.nelectron // 2
-        nvir_all = mf.mol.nao - nocc_all
+        nvir_all = len(mf.mo_energy) - nocc_all
         _, mo_energy_full, Lpq_full = pyscf_util.get_pyscf_input_mol_r(mf)
     elif isinstance(mf, scf.uhf.UHF) or isinstance(mf, dft.uks.UKS):
         raise NotImplementedError('Unrestricted HF is not implemented.')
@@ -1181,7 +1181,7 @@ def make_rdm1_relaxed_pprpa(pprpa, mf, xy=None, mult='t', istate=0):
         if xy is None:
             xy = pprpa.xy[istate]
         nocc_all = mf.mol.nelectron
-        nvir_all = mf.mol.nao * 2 - nocc_all
+        nvir_all = len(mf.mo_energy) - nocc_all
         _, mo_energy_full, Lpq_full = pyscf_util.get_pyscf_input_mol_g(mf)
 
     nocc = pprpa.nocc

@@ -206,7 +206,7 @@ def make_rdm1_relaxed_rhf_pprpa(
         else:
             xy = pprpa.xy_t[istate]
     nocc_all = mf.mol.nelectron // 2
-    nvir_all = mf.mol.nao - nocc_all
+    nvir_all = len(mf.mo_energy) - nocc_all
     nocc = pprpa.nocc
     nvir = pprpa.nvir
     nfrozen_occ = nocc_all - nocc

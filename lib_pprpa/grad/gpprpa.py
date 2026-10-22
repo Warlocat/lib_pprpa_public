@@ -182,7 +182,7 @@ def make_rdm1_relaxed_ghf_pprpa(pprpa, mf, xy=None, istate=0, cphf_max_cycle=20,
     if xy is None:
         xy = pprpa.xy[istate]
     nocc_all = mf.mol.nelectron
-    nvir_all = mf.mol.nao*2 - nocc_all
+    nvir_all = len(mf.mo_energy) - nocc_all
     nocc = pprpa.nocc
     nvir = pprpa.nvir
     nfrozen_occ = nocc_all - nocc
