@@ -5,8 +5,9 @@ Author: Chaoqun Zhang <cq_zhang@outlook.com>
 import numpy as np
 import scipy
 from pyscf import lib
-from functools import reduce
-from lib_pprpa.pprpa_util import start_clock, stop_clock, GMRES_Pople, GMRES_wrapper
+from pyscf.grad import rks as rks_grad
+from pyscf.lib import logger
+from lib_pprpa.pprpa_util import start_clock, stop_clock, GMRES_Pople
 
 try:
     from socutils.scf import spinor_hf
@@ -259,7 +260,7 @@ def get_isc_S_T(mf, pprpa, socints_mo=None, soc_variants="bp1e", print_format="s
         print("*  ME   |     X-component     |     Y-component     |     Z-component     *")
     print("*       |    REAL     IMAG    |    REAL     IMAG    |    REAL     IMAG    *")
     print("***************************************************************************")
-    format_output = f"* {{:6s}}|  {{:8.2f}} {{:8.2f}}  |  {{:8.2f}} {{:8.2f}}  |  {{:8.2f}} {{:8.2f}}  *"
+    format_output = "* {:6s}|  {:8.2f} {:8.2f}  |  {:8.2f} {:8.2f}  |  {:8.2f} {:8.2f}  *"
     results = []
     for i_t in range(n_triplet):
         results.append([])
@@ -1196,10 +1197,6 @@ def make_rdm1_relaxed_pprpa(pprpa, mf, xy=None, mult='t', istate=0):
         raise NotImplementedError('hf_var = {}. is not implemented in make_rdm1_relaxed_pprpa'.format(hf_var))
 
 
-from pyscf.lib import logger
-from pyscf.grad import rks as rks_grad
-
-
 def get_veff_df_rks(ks_grad, mol=None, dm=None):
     """Coulomb + XC functional response
     Modified from pyscf.df.grad.rks.get_veff
@@ -1471,8 +1468,10 @@ def get_veff_krks(ks_grad, dm=None, kpts=None, ao_cache=None):
     from pyscf.pbc.grad.krks import get_vxc
     mf = ks_grad.base
     cell = ks_grad.cell
-    if dm is None: dm = mf.make_rdm1()
-    if kpts is None: kpts = mf.kpts
+    if dm is None:
+        dm = mf.make_rdm1()
+    if kpts is None:
+        kpts = mf.kpts
     t0 = (logger.process_clock(), logger.perf_counter())
 
     ni = mf._numint
