@@ -7,11 +7,14 @@ from pyscf.df.df_jk import _DFHF
 from pyscf.lib import logger
 from lib_pprpa.grad import grad_utils
 from lib_pprpa.grad.pprpa import Gradients as rhf_pprpa_grad
+from lib_pprpa.gpprpa_davidson import GppRPA_Davidson
+from lib_pprpa.gpprpa_direct import GppRPA_direct
 
 try:
     from socutils.scf import spinor_hf
-    from socutils.grad import ghf_grad
-    from socutils.grad import df_ghf_grad
+    # registers SpinorSCF.Gradients, which grad_elec calls through mf.Gradients()
+    from socutils.grad import ghf_grad  # noqa: F401
+    from socutils.grad import df_ghf_grad  # noqa: F401
 
     with_socuils = True
 except ImportError:
@@ -182,7 +185,7 @@ def make_rdm1_relaxed_ghf_pprpa(pprpa, mf, xy=None, istate=0, cphf_max_cycle=20,
     if xy is None:
         xy = pprpa.xy[istate]
     nocc_all = mf.mol.nelectron
-    nvir_all = mf.mol.nao*2 - nocc_all
+    nvir_all = len(mf.mo_energy) - nocc_all
     nocc = pprpa.nocc
     nvir = pprpa.nvir
     nfrozen_occ = nocc_all - nocc
@@ -377,8 +380,5 @@ class Gradients(rhf_pprpa_grad):
 
 
 Grad = Gradients
-
-from lib_pprpa.gpprpa_direct import GppRPA_direct
-from lib_pprpa.gpprpa_davidson import GppRPA_Davidson
 
 GppRPA_direct.Gradients = GppRPA_Davidson.Gradients = lib.class_as_method(Gradients)
