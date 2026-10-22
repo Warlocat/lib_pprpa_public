@@ -5,8 +5,8 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from lib_pprpa.analyze import pprpa_print_a_pair, get_pprpa_oscillator_strength
-from lib_pprpa.pair_operator import apply_pair_operator, operator_strips, pack_eri, \
-    pair_operator
+from lib_pprpa.pair_operator import apply_pair_operator, check_gram, operator_strips, \
+    pack_eri, pair_operator
 from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector, \
     diagonalize_pprpa_singlet, diagonalize_pprpa_triplet
 
@@ -1162,11 +1162,17 @@ class ppRPA_Davidson():
         return
 
     def use_eri(self, eri_vvvv, eri_oovv, eri_oooo):
-        """Use ERI instead of Lpq."""
-        """ERI symmetry <pq|rs>; kept as their packed Gram triangles, from which the
-        pair-space operator of each multiplicity is built at its first product."""
+        """Use the active-space ERIs instead of Lpq: the physicist blocks <pq|rs>, or
+        their packed Gram triangles (``pair_operator.gram_from_lpq``,
+        ``pyscf_util.get_pyscf_input_mol_eri_r(packed=True)``), which are kept as given.
+        The pair-space operator of each multiplicity is built from them at its first
+        product."""
         self._use_eri = True
-        self.eri_gram = pack_eri(eri_vvvv, eri_oovv, eri_oooo)
+        blocks = (eri_vvvv, eri_oovv, eri_oooo)
+        if all(np.ndim(block) == 1 for block in blocks):
+            self.eri_gram = check_gram(*blocks, self.nocc, self.nvir)
+        else:
+            self.eri_gram = pack_eri(*blocks)
         self._pair_op = None
         return
 

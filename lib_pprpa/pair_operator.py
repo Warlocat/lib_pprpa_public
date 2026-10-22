@@ -9,7 +9,8 @@ that basis the ERI part of the product is one symmetric matrix,
 
 with blocks M_oo, M_vv and B = M[oo, vv], kept as row strips of the lower triangles of
 M_oo and M_vv (the diagonal block of a strip in full and halved) and of B.  It is built
-from the packed Gram blocks of ``pack_eri`` / ``gpu_ao2mo.gpu_ao2mo_blocks``.
+from the packed Gram blocks of ``pack_eri``, ``gram_from_lpq`` or
+``gpu_ao2mo.gpu_ao2mo_blocks``.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -17,9 +18,9 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from pyscf import lib
 
-__all__ = ['STRIP_ROWS', 'PairOperator', 'apply_pair_operator', 'operator_strips',
-           'pack_eri', 'pack_offset', 'pair_offset', 'pair_operator', 'pair_operator_bytes',
-           'row_strips']
+__all__ = ['STRIP_ROWS', 'PairOperator', 'apply_pair_operator', 'check_gram',
+           'gram_from_lpq', 'operator_strips', 'pack_eri', 'pack_offset', 'pair_offset',
+           'pair_operator', 'pair_operator_bytes', 'row_strips']
 
 # Pair rows per strip.  The diagonal block of a strip is stored in full, which adds
 # rows / npair to the storage of a block; the GEMMs are bandwidth-bound at any width.
@@ -27,6 +28,9 @@ STRIP_ROWS = 1024
 # Operator rows per build task: the index arrays of a task are a few times this many
 # rows of the operator, so the threads together hold tens of MB beyond M.
 _BUILD_ROWS = 64
+# Gram rows per GEMM in gram_from_lpq: a block this size is the only transient beyond
+# the packed output.
+_GRAM_BLOCK_BYTES = 1 << 30
 
 
 def pack_offset(n):
@@ -129,6 +133,44 @@ def pack_eri(vvvv, oovv, oooo):
     with ThreadPoolExecutor(lib.num_threads()) as ex:
         list(ex.map(task, jobs))
     return out["vv"], out["ov"], out["oo"]
+
+
+def _gram(L):
+    """Packed lower triangle of L^T L for L (naux, npair), _GRAM_BLOCK_BYTES of rows per
+    GEMM, so the square matrix never exists."""
+    n = L.shape[1]
+    out = np.empty(pack_offset(n))
+    blk = max(1, _GRAM_BLOCK_BYTES // (8 * n))
+    for P0 in range(0, n, blk):
+        P1 = min(n, P0 + blk)
+        _pack_rows(L[:, P0:P1].T @ L[:, :P1], P0, out)
+    return out
+
+
+def gram_from_lpq(Lpq, nocc):
+    """Packed Gram triangles vvvv, oovv, oooo (the format of ``pack_eri``) straight from
+    real three-index factors Lpq[L, p, q] = Lpq[L, q, p] of the active orbitals,
+    occupied first, (pq|rs) = sum_L Lpq[L, p, q] Lpq[L, r, s]; the four-index blocks
+    are never formed."""
+    Lpq = np.asarray(Lpq)
+    naux, nmo = Lpq.shape[:2]
+    o, v = slice(0, nocc), slice(nocc, nmo)
+    Lvv = lib.pack_tril(np.ascontiguousarray(Lpq[:, v, v]))
+    Lov = np.ascontiguousarray(Lpq[:, o, v]).reshape(naux, -1)
+    Loo = lib.pack_tril(np.ascontiguousarray(Lpq[:, o, o]))
+    return _gram(Lvv), _gram(Lov), _gram(Loo)
+
+
+def check_gram(vvvv, oovv, oooo, nocc, nvir):
+    """The packed Gram triangles as NumPy arrays, after checking their lengths."""
+    blocks = {"vvvv": (vvvv, pack_offset(pack_offset(nvir))),
+              "oovv": (oovv, pack_offset(nocc * nvir)),
+              "oooo": (oooo, pack_offset(pack_offset(nocc)))}
+    for name, (block, n) in blocks.items():
+        if np.ndim(block) != 1 or np.shape(block)[0] != n:
+            raise ValueError(f"{name}: expected a packed Gram block of {n} elements, got "
+                             f"shape {np.shape(block)}")
+    return tuple(np.asarray(block) for block, _ in blocks.values())
 
 
 def _tri(a, b):

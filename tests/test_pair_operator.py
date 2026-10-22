@@ -5,8 +5,8 @@ import numpy as np
 import pytest
 
 import lib_pprpa.pair_operator as pair_operator_module
-from lib_pprpa.pair_operator import (operator_strips, pack_eri, pack_offset, pair_offset,
-                                     pair_operator, pair_operator_bytes)
+from lib_pprpa.pair_operator import (gram_from_lpq, operator_strips, pack_eri, pack_offset,
+                                     pair_offset, pair_operator, pair_operator_bytes)
 from lib_pprpa.pprpa_davidson import _pprpa_contraction, ppRPA_Davidson
 
 
@@ -158,3 +158,42 @@ def test_davidson_roots_match_lpq(multi):
     eri.kernel(multi)
     exci = (lambda mp: mp.exci_s) if multi == "s" else (lambda mp: mp.exci_t)
     np.testing.assert_allclose(exci(eri), exci(lpq), rtol=0, atol=1e-9)
+
+
+def test_gram_from_lpq_matches_pack_eri(monkeypatch):
+    """The packed Gram triangles straight from Lpq, one row block per GEMM, equal those
+    packed from the four-index blocks."""
+    nocc, _, Lpq = _system(8)
+    ref = pack_eri(*_physicist(Lpq, nocc))
+    for block_bytes in (None, 8 * 7):
+        if block_bytes is not None:
+            monkeypatch.setattr(pair_operator_module, "_GRAM_BLOCK_BYTES", block_bytes)
+        for got, want in zip(gram_from_lpq(Lpq, nocc), ref):
+            np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-14)
+
+
+@pytest.mark.parametrize("multi", ("s", "t"))
+def test_use_eri_takes_packed_gram(multi):
+    """use_eri keeps packed Gram blocks as given: the same products as from the
+    four-index blocks; blocks of the wrong length are refused."""
+    nocc, moe, Lpq = _system(9)
+    ref = _eri_solver(nocc, moe, multi, Lpq)
+    packed = _solver(nocc, moe, multi)
+    packed.use_eri(*ref.eri_gram)
+    tv = np.random.default_rng(10).standard_normal((4, ref.full_dim))
+    np.testing.assert_array_equal(_pprpa_contraction(packed, tv), _pprpa_contraction(ref, tv))
+    with pytest.raises(ValueError):
+        packed.use_eri(ref.eri_gram[0][:-1], *ref.eri_gram[1:])
+
+
+def test_mol_packed_eri_matches_four_index():
+    """pyscf_util packed=True: each Gram block transformed on its own equals the packed
+    four-index blocks of the whole active space."""
+    from pyscf import gto, scf
+    from lib_pprpa.pyscf_util import get_pyscf_input_mol_eri_r
+    mol = gto.M(atom="O 0 0 0; H 0.76 0 0.59; H -0.76 0 0.59", basis="6-31g", verbose=0)
+    mf = scf.RHF(mol).run()
+    _, _, vvvv, oooo, oovv = get_pyscf_input_mol_eri_r(mf, nocc_act=4, nvir_act=6)
+    _, _, *got = get_pyscf_input_mol_eri_r(mf, nocc_act=4, nvir_act=6, packed=True)
+    for g, want in zip((got[0], got[2], got[1]), pack_eri(vvvv, oovv, oooo)):
+        np.testing.assert_allclose(g, want, rtol=0, atol=1e-12)
