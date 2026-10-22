@@ -12,7 +12,10 @@ M_oo and M_vv (the diagonal block of a strip in full and halved) and of B.  It i
 from the packed Gram blocks of ``pack_eri`` / ``gpu_ao2mo.gpu_ao2mo_blocks``.
 """
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
+from pyscf import lib
 
 __all__ = ['STRIP_ROWS', 'PairOperator', 'apply_pair_operator', 'operator_strips',
            'pack_eri', 'pack_offset', 'pair_offset', 'pair_operator', 'pair_operator_bytes',
@@ -21,6 +24,9 @@ __all__ = ['STRIP_ROWS', 'PairOperator', 'apply_pair_operator', 'operator_strips
 # Pair rows per strip.  The diagonal block of a strip is stored in full, which adds
 # rows / npair to the storage of a block; the GEMMs are bandwidth-bound at any width.
 STRIP_ROWS = 1024
+# Operator rows per build task: the index arrays of a task are a few times this many
+# rows of the operator, so the threads together hold tens of MB beyond M.
+_BUILD_ROWS = 64
 
 
 def pack_offset(n):
@@ -85,34 +91,44 @@ def operator_strips(nocc, nvir, multi, rows=None):
 
 
 def _pack_rows(rows, P0, out):
-    """Rows P0, P0 + 1, ... of the packed lower triangle ``out`` from the leading
-    columns of ``rows``."""
-    m = rows.shape[0]
-    keep = np.arange(P0 + m)[None, :] <= P0 + np.arange(m)[:, None]
-    out[pack_offset(P0):pack_offset(P0 + m)] = rows[:, :P0 + m][keep]
+    """Rows P0, P0 + 1, ... of the packed lower triangle ``out``: the leading P0 + k + 1
+    columns of rows[k]."""
+    off = pack_offset(P0)
+    for k, row in enumerate(rows):
+        n = P0 + k + 1
+        out[off:off + n] = row[:n]
+        off += n
 
 
 def pack_eri(vvvv, oovv, oooo):
     """Packed Gram triangles (the format of ``gpu_ao2mo_blocks``) from physicist blocks
     vvvv[a,b,c,d] = <ab|cd>, oovv[i,j,a,b] = <ij|ab>, oooo: (pq|rs) for Q <= P at
     P (P + 1) / 2 + Q, P = (p, r) over the compact pairs p >= r of vvvv and oooo and
-    over i nvir + a of oovv.  One first orbital at a time, so no block is copied whole."""
-    def compact(block):
-        n = block.shape[0]
-        p, q = np.tril_indices(n)
-        out = np.empty(pack_offset(pack_offset(n)))
-        for a in range(n):
-            # rows (a, c), c <= a: (ac|bd) = <ab|cd> over the compact (b, d)
-            _pack_rows(np.asarray(block[a, :, :a + 1]).transpose(1, 0, 2)[:, p, q],
-                       pack_offset(a), out)
-        return out
-
+    over i nvir + a of oovv.  One first orbital per thread task, so no block is copied
+    whole."""
     no, nv = oovv.shape[0], oovv.shape[2]
-    ov = np.empty(pack_offset(no * nv))
-    for i in range(no):
-        # rows (i, a): (ia|jb) = <ij|ab> over (j, b)
-        _pack_rows(np.asarray(oovv[i]).transpose(1, 0, 2).reshape(nv, no * nv), i * nv, ov)
-    return compact(vvvv), ov, compact(oooo)
+    out = {"vv": np.empty(pack_offset(pack_offset(nv))), "ov": np.empty(pack_offset(no * nv)),
+           "oo": np.empty(pack_offset(pack_offset(no)))}
+    tril = {"vv": np.tril_indices(nv), "oo": np.tril_indices(no)}
+
+    def task(job):
+        kind, a = job
+        if kind == "ov":
+            # rows (i, a): (ia|jb) = <ij|ab> over (j, b)
+            rows = np.asarray(oovv[a]).transpose(1, 0, 2).reshape(nv, no * nv)
+            _pack_rows(rows, a * nv, out[kind])
+        else:
+            # rows (a, c), c <= a: (ac|bd) = <ab|cd> over the compact (b, d)
+            block = vvvv if kind == "vv" else oooo
+            rows = np.asarray(block[a, :, :a + 1]).transpose(1, 0, 2)[:, tril[kind][0],
+                                                                      tril[kind][1]]
+            _pack_rows(rows, pack_offset(a), out[kind])
+
+    jobs = [("vv", a) for a in reversed(range(nv))] + [("ov", i) for i in range(no)] + \
+           [("oo", i) for i in range(no)]
+    with ThreadPoolExecutor(lib.num_threads()) as ex:
+        list(ex.map(task, jobs))
+    return out["vv"], out["ov"], out["oo"]
 
 
 def _tri(a, b):
@@ -120,46 +136,88 @@ def _tri(a, b):
     return hi * (hi + 1) // 2 + lo
 
 
+def _tri_tables(n):
+    """T[p, r] = tri(p, r) for orbitals p, r < n, TT[x] = x (x + 1) / 2 over its values,
+    and T2 = TT[T]."""
+    orb = np.arange(n)
+    T = _tri(orb[:, None], orb[None, :])
+    x = np.arange(pack_offset(n))
+    TT = x * (x + 1) // 2
+    return T, TT[T], TT
+
+
 def _fpair(p, q):
     return np.where(p == q, np.sqrt(0.5), 1.0)
 
 
-def _sym_strip(G, pp, pq, R0, R1, sgn):
-    """Rows [R0, R1) and columns [0, R1) of M_oo / M_vv from the compact Gram triangle
-    G, <pq|rs> = (pr|qs) at tri(tri(p, r), tri(q, s)); the columns from R0 on form the
-    diagonal block, which both GEMMs of a product use: halved."""
-    p, q, r, s = pp[R0:R1, None], pq[R0:R1, None], pp[None, :R1], pq[None, :R1]
-    S = G[_tri(_tri(p, r), _tri(q, s))] + sgn * G[_tri(_tri(p, s), _tri(q, r))]
-    S *= _fpair(p, q) * _fpair(r, s)
-    S[:, R0:] *= 0.5
-    return S
+def _sym_rows(out, G, T, T2, TT, pp, pq, R0, r0, r1, sgn):
+    """Rows [r0, r1) of the strip of M_oo / M_vv that starts at row R0, over its columns
+    [0, R1), from the compact Gram triangle G, <pq|rs> = (pr|qs) at tri(tri(p, r),
+    tri(q, s)); the columns from R0 on form the diagonal block, which both GEMMs of a
+    product use: halved."""
+    p, q = pp[r0:r1, None], pq[r0:r1, None]
+    r, s = pp[None, :out.shape[1]], pq[None, :out.shape[1]]
+    # rows and columns are pairs p >= q and r >= s, so tri(p, r) >= tri(q, s)
+    np.take(G, T2[p, r] + T[q, s], out=out, mode="clip")
+    a, b = T[p, s], T[q, r]
+    hi = np.maximum(a, b)
+    b += a
+    b -= hi
+    term = np.take(G, TT[hi] + b, mode="clip")
+    term *= sgn
+    out += term
+    out *= _fpair(p, q) * _fpair(r, s)
+    out[:, R0:] *= 0.5
 
 
-def _b_strip(G, io, jo, av, bv, R0, R1, nvir, sgn):
-    """Rows [R0, R1) of B from the oovv Gram triangle G, <ij|ab> = (ia|jb), Gram pair
+def _b_rows(out, G, TT, io, jo, av, bv, r0, r1, nvir, sgn):
+    """Rows [r0, r1) of B from the oovv Gram triangle G, <ij|ab> = (ia|jb), Gram pair
     index i nvir + a."""
-    i, j = io[R0:R1, None], jo[R0:R1, None]
-    S = G[_tri(i * nvir + av, j * nvir + bv)] + sgn * G[_tri(i * nvir + bv, j * nvir + av)]
-    S *= _fpair(i, j) * _fpair(av, bv)
-    return S
+    i, j = io[r0:r1, None], jo[r0:r1, None]
+    ivir, jvir = i * nvir, j * nvir
+    # i >= j and a >= b, so i nvir + a >= j nvir + b; for i > j also i nvir + b > j nvir + a
+    np.take(G, TT[ivir + av] + (jvir + bv), out=out, mode="clip")
+    idx = TT[ivir + bv] + (jvir + av)
+    diag = io[r0:r1] == jo[r0:r1]
+    if diag.any():
+        # i = j: <ii|ba> = <ii|ab>, the same Gram element as the first term
+        idx[diag] = TT[ivir[diag] + av] + (jvir[diag] + bv)
+    term = np.take(G, idx, mode="clip")
+    term *= sgn
+    out += term
+    out *= _fpair(i, j) * _fpair(av, bv)
 
 
 def pair_operator(vvvv, oovv, oooo, nocc, nvir, multi, rows=None):
     """The pair-space operator of multiplicity ``multi`` ('s' or 't') from the packed
-    Gram blocks of ``pack_eri``, as NumPy strips (``rows`` as for ``row_strips``)."""
+    Gram blocks of ``pack_eri``, as NumPy strips (``rows`` as for ``row_strips``), built
+    _BUILD_ROWS rows per thread task."""
     if multi not in ("s", "t"):
         raise ValueError(f"multi must be 's' or 't', got {multi!r}")
     sgn = 1.0 if multi == "s" else -1.0
     k = 0 if multi == "s" else -1
     pairs = {"oo": np.tril_indices(nocc, k), "vv": np.tril_indices(nvir, k)}
     gram = {"oo": np.asarray(oooo), "vv": np.asarray(vvvv), "ov": np.asarray(oovv)}
-    strips = []
-    for kind, _, _, R0, R1, _ in operator_strips(nocc, nvir, multi, rows):
-        if kind == "ov":
-            S = _b_strip(gram[kind], *pairs["oo"], *pairs["vv"], R0, R1, nvir, sgn)
-        else:
-            S = _sym_strip(gram[kind], *pairs[kind], R0, R1, sgn)
+    tables = {"oo": _tri_tables(nocc), "vv": _tri_tables(nvir)}
+    x = np.arange(nocc * nvir)
+    tt_ov = x * (x + 1) // 2
+    strips, tasks = [], []
+    for kind, _, _, R0, R1, nbytes in operator_strips(nocc, nvir, multi, rows):
+        S = np.empty((R1 - R0, nbytes // (8 * (R1 - R0))))
         strips.append((kind, R0, R1, S))
+        tasks += [(kind, R0, r0, min(R1, r0 + _BUILD_ROWS), S)
+                  for r0 in range(R0, R1, _BUILD_ROWS)]
+
+    def task(job):
+        kind, R0, r0, r1, S = job
+        out = S[r0 - R0:r1 - R0]
+        if kind == "ov":
+            _b_rows(out, gram[kind], tt_ov, *pairs["oo"], *pairs["vv"], r0, r1, nvir, sgn)
+        else:
+            _sym_rows(out, gram[kind], *tables[kind], *pairs[kind], R0, r0, r1, sgn)
+
+    with ThreadPoolExecutor(lib.num_threads()) as ex:
+        list(ex.map(task, tasks))
     return PairOperator(nocc, nvir, multi, strips)
 
 

@@ -4,6 +4,7 @@ and Davidson roots against the Lpq path on the same integrals."""
 import numpy as np
 import pytest
 
+import lib_pprpa.pair_operator as pair_operator_module
 from lib_pprpa.pair_operator import (operator_strips, pack_eri, pack_offset, pair_offset,
                                      pair_operator, pair_operator_bytes)
 from lib_pprpa.pprpa_davidson import _pprpa_contraction, ppRPA_Davidson
@@ -97,6 +98,22 @@ def test_strips_cover_the_operator():
                 if kind != "ov":
                     extra += sum(8 * (R1 - R0) * (R1 - R0 - 1) // 2 for R0, R1 in spans)
             assert sum(s[-1] for s in plan) == pair_operator_bytes(nocc, nvir, multi) + extra
+
+
+@pytest.mark.parametrize("multi", ("s", "t"))
+def test_build_tasks_do_not_change_the_operator(multi, monkeypatch):
+    """The threaded build fills the strips one block of rows per task: any block size
+    gives the same operator, bit for bit."""
+    nocc, _, Lpq = _system(7)
+    nvir = Lpq.shape[1] - nocc
+    gram = pack_eri(*_physicist(Lpq, nocc))
+    ref = pair_operator(*gram, nocc, nvir, multi)
+    for build_rows in (1, 2, 5):
+        monkeypatch.setattr(pair_operator_module, "_BUILD_ROWS", build_rows)
+        got = pair_operator(*gram, nocc, nvir, multi)
+        for (k1, a1, b1, S1), (k2, a2, b2, S2) in zip(ref.strips, got.strips):
+            assert (k1, a1, b1) == (k2, a2, b2)
+            np.testing.assert_array_equal(S1, S2)
 
 
 @pytest.mark.parametrize("multi", ("s", "t"))
