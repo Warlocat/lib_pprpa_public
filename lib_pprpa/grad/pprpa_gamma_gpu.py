@@ -40,7 +40,6 @@ import numpy as np
 import cupy as cp
 from scipy.linalg import block_diag
 
-from pyscf import lib
 from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
@@ -212,9 +211,11 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         kf = (gdft.KRKS(cell, kpts=kpts, xc=mf.xc) if is_ks
               else gscf.KRHF(cell, kpts=kpts))
         kf.exxdiv = mf.exxdiv
-        kf.mo_coeff = kmf.mo_coeff; kf.mo_energy = kmf.mo_energy
+        kf.mo_coeff = kmf.mo_coeff
+        kf.mo_energy = kmf.mo_energy
         kf.mo_occ = kmf.mo_occ
-        kf.with_df = _aftdf(cell, kpts); kf.rsjk = None
+        kf.with_df = _aftdf(cell, kpts)
+        kf.rsjk = None
         return kf
 
     Dg, Pg, Tg, Wg = (cp.asarray(a) for a in (D, P, T, W))
