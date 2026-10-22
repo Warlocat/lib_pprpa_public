@@ -23,13 +23,9 @@ CHANNEL = "pp"
 KPTS = np.zeros((1, 3))
 
 
-@pytest.fixture(scope="module")
-def system():
-    """Distorted C2 diamond cell, charge +2, GPU SCF, MO ERIs through the GPU ao2mo."""
-    import cupy as cp
-    from pyscf.pbc import dft as cdft, gto
-    from gpu4pyscf.pbc import dft as gdft
-    from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
+def _cell():
+    """Distorted C2 diamond cell, charge +2."""
+    from pyscf.pbc import gto
     a0 = 3.5668
     cell = gto.Cell()
     cell.atom = [["C", [0.0, 0.0, 0.0]], ["C", [a0 / 4 + 0.05, a0 / 4, a0 / 4]]]
@@ -40,6 +36,17 @@ def system():
     cell.ke_cutoff = 100.0
     cell.verbose = 0
     cell.build()
+    return cell
+
+
+@pytest.fixture(scope="module")
+def system():
+    """The C2 cell with a GPU SCF and its MO ERIs through the GPU ao2mo."""
+    import cupy as cp
+    from pyscf.pbc import dft as cdft
+    from gpu4pyscf.pbc import dft as gdft
+    from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
+    cell = _cell()
     kg = gdft.KRKS(cell, kpts=KPTS, xc=XC)
     kg.exxdiv = None
     kg.conv_tol = 1e-10
@@ -164,3 +171,31 @@ def test_grad_elec_matches_cpu_and_warm_start(system, mult):
     assert g_gpu.cphf_x0 is not None and g_gpu.cphf_x0.shape == (cell.nao, cell.nao)
     de_warm = g_gpu.grad_elec(xy, mult, range(cell.natm))
     assert np.abs(de_warm - de_gpu).max() < 1e-9 * scale
+
+
+# omega = 1 / bohr: on this cell's mesh the long-range kernel keeps most of its weight
+# (at HSE06's 0.11 it is ~exp(-35) at the smallest G and the test could not tell)
+@pytest.mark.parametrize("xc", ("0.25*SR_HF(1.0) + 0.75*PBE, PBE",
+                                "0.4*LR_HF(1.0) + 0.6*PBE, PBE", "pbe0"))
+def test_hybrid_reference_exchange_matches_cpu(xc):
+    """Hybrid reference exchange force against the CPU driver: short-range exchange only
+    (alpha = 0), long-range only (hyb = 0), and PBE0 (the same factor at both ranges)."""
+    from pyscf.pbc import dft as cdft
+    from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
+    from lib_pprpa.grad import pprpa_gamma as cpu
+    from lib_pprpa.grad import pprpa_gamma_gpu as gpu
+    cell = _cell()
+    mf = cdft.RKS(cell, xc=xc)
+    mf.exxdiv = None
+    mf.conv_tol = 1e-10
+    mf.kernel()
+    nocc = cell.nelectron // 2
+    eri = gpu_ao2mo_blocks(cell, mf.mo_coeff[:, :nocc], mf.mo_coeff[:, nocc:], cell.mesh)
+    mp, xy = _solve((cell, mf, nocc, eri), "t")
+    de = []
+    for module in (cpu, gpu):
+        g = module.Gradients(mp, mf, "t", 0)
+        g.cphf_conv_tol = 1e-10
+        g.cphf_max_cycle = 100
+        de.append(g.grad_elec(xy, "t", range(cell.natm)))
+    assert np.abs(de[1] - de[0]).max() < 1e-7 * np.abs(de[0]).max()
