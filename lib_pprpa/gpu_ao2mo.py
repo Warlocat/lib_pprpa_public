@@ -35,7 +35,7 @@ from gpu4pyscf.pbc import tools as gtools
 from lib_pprpa.gpu_coulomb import codensity, coulomb_potential, half_kernel, mo_on_grid
 from lib_pprpa.gpu_emulation import emulation_pays, fp64_emulation
 from lib_pprpa.gpu_mem import (FFT_BATCH_MIN, empty_pinned, eri_bytes, free_bytes,
-                               max_fft_batch, pack_offset, plan_budget)
+                               max_fft_batch, pack_offset, plan_budget, pooled)
 from lib_pprpa.gpu_multi import default_devices, each, run
 
 __all__ = ['gpu_ao2mo_blocks', 'gpu_ao2mo_strips', 'PAIR_BLK_CAP']
@@ -256,16 +256,18 @@ def gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk=None, devices=None, 
     mesh = np.asarray(mesh, dtype=int)
     ng = int(np.prod(mesh))
     no, nv = np.asarray(cocc).shape[1], np.asarray(cvir).shape[1]
-    per_dev = each(devices, lambda rank: mo_on_grid(cell, [cocc, cvir], mesh)
-                   + [half_kernel(gtools.get_coulG(cell, mesh=mesh) * (cell.vol / ng), mesh)])
-    log.info('GPU ao2mo: nocc=%d nvir=%d ngrid=%d packed eri=%.2f GB on %d device(s)',
-             no, nv, ng, eri_bytes(no, nv) / 1e9, len(devices))
-    t0 = log.timer('ao2mo MO grids', *t0)
+    # every FFT batch makes outputs over gpu4pyscf's cudaMalloc threshold: pool them
+    with pooled():
+        per_dev = each(devices, lambda rank: mo_on_grid(cell, [cocc, cvir], mesh)
+                       + [half_kernel(gtools.get_coulG(cell, mesh=mesh) * (cell.vol / ng), mesh)])
+        log.info('GPU ao2mo: nocc=%d nvir=%d ngrid=%d packed eri=%.2f GB on %d device(s)',
+                 no, nv, ng, eri_bytes(no, nv) / 1e9, len(devices))
+        t0 = log.timer('ao2mo MO grids', *t0)
 
-    for name, sel in (('vvvv', (1, 1)), ('oooo', (0, 0)), ('oovv', (0, 1))):
-        nA, nB = per_dev[0][sel[0]].shape[0], per_dev[0][sel[1]].shape[0]
-        layout = _PairLayout(nA, nB, compact=sel[0] == sel[1])
-        _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, emulate, log)
-        t0 = log.timer(f'ao2mo {name}', *t0)
-    per_dev = None
+        for name, sel in (('vvvv', (1, 1)), ('oooo', (0, 0)), ('oovv', (0, 1))):
+            nA, nB = per_dev[0][sel[0]].shape[0], per_dev[0][sel[1]].shape[0]
+            layout = _PairLayout(nA, nB, compact=sel[0] == sel[1])
+            _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, emulate, log)
+            t0 = log.timer(f'ao2mo {name}', *t0)
+        per_dev = None
     each(devices, lambda rank: cp.get_default_memory_pool().free_all_blocks())
