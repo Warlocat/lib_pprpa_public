@@ -8,13 +8,17 @@ nothing is copied between devices.  Two threads on one device are not safe
 (cuFFT and the MO-grid GEMMs gave wrong results under contention), so ranks
 that share a device run one after another in that device's thread; naming a
 device twice still exercises the split bookkeeping, which the tests use on one
-GPU.  The default everywhere is the current device alone.
+GPU.  The default everywhere is the current device alone.  A caller's
+``gpu_mem.pooled`` scope carries over to the device threads.
 '''
 
+import contextlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import cupy as cp
+
+from lib_pprpa.gpu_mem import is_pooled, pooled
 
 __all__ = ['default_devices', 'each', 'run']
 
@@ -33,13 +37,19 @@ def _by_device(devices):
     return list(groups.items())
 
 
+def _scope():
+    '''The caller's allocation scope, for its device threads.'''
+    return pooled if is_pooled() else contextlib.nullcontext
+
+
 def each(devices, fn):
     '''Call ``fn(rank)`` once per rank, on its device; return the results in rank order.'''
     results = [None] * len(devices)
+    scope = _scope()
 
     def worker(item):
         dev, ranks = item
-        with cp.cuda.Device(dev):
+        with cp.cuda.Device(dev), scope():
             for rank in ranks:
                 results[rank] = fn(rank)
             cp.cuda.Stream.null.synchronize()
@@ -61,10 +71,11 @@ def run(devices, setup, work, tasks):
     lock = threading.Lock()
     results = [None] * len(queue)
     states = [None] * len(devices)
+    scope = _scope()
 
     def worker(item):
         dev, ranks = item
-        with cp.cuda.Device(dev):
+        with cp.cuda.Device(dev), scope():
             for rank in ranks:
                 states[rank] = state = setup(rank)
                 while True:
