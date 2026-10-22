@@ -10,8 +10,8 @@ Term -> gpu4pyscf primitive map (D=KS ref dm, P=relaxed corr dm, T=D+P,
 W=energy-weighted dm, X=pp-RPA 2-RDM amplitude density):
   hcore   : hcore_contracted.hcore_deriv_contracted(T)  (density on the mesh once)
   ovlp    : krhf_g.contract_h1e_dm(s1, W)            (note +=, W carries -dme0)
-  J ref   : polarization Q(T)-Q(P) via jk_energy_per_atom(j=1,sr=lr=hyb), FFTDF
-  hyb K   : Q(T)-Q(P) via jk_energy_per_atom(j=0,sr=lr=hyb), AFTDF   (only if hyb)
+  J ref   : polarization Q(T)-Q(P) via jk_energy_per_atom(j=1,sr=lr=0), FFTDF
+  hyb K   : Q(T)-Q(P) via jk_energy_per_atom(j=0,sr=hyb,lr=alpha), AFTDF  (hybrids)
   pairing : gpu_pairing_force.pairing_k_force_lowrank(C, M) for X = C M C^T, FFT
   Vxc     : 2*einsum(v1ao[1:,atom], T) from grad_utils_gpu_pbc._contract_xc_kernel
   fxc     : 1*einsum(f1vo[1:,atom], D)  (same routine; factor 1 = CPU's 0.5*..*2)
@@ -40,7 +40,6 @@ import numpy as np
 import cupy as cp
 from scipy.linalg import block_diag
 
-from pyscf import lib
 from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
@@ -200,20 +199,22 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     gg = kmf.nuc_grad_method()
 
     ni = kmf._numint if is_ks else None
+    # exchange factors as gpu4pyscf.pbc.grad.krks: hyb short range, alpha long range
     if is_ks:
         omega, alpha, hyb = ni.rsh_and_hybrid_coeff(mf.xc)
     else:
         omega, alpha, hyb = 0.0, 1.0, 1.0
     exxdiv = mf.exxdiv
-    need_k = (not is_ks) or abs(hyb) > 1e-12
 
     def _kmf_aft():
         kf = (gdft.KRKS(cell, kpts=kpts, xc=mf.xc) if is_ks
               else gscf.KRHF(cell, kpts=kpts))
         kf.exxdiv = mf.exxdiv
-        kf.mo_coeff = kmf.mo_coeff; kf.mo_energy = kmf.mo_energy
+        kf.mo_coeff = kmf.mo_coeff
+        kf.mo_energy = kmf.mo_energy
         kf.mo_occ = kmf.mo_occ
-        kf.with_df = _aftdf(cell, kpts); kf.rsjk = None
+        kf.with_df = _aftdf(cell, kpts)
+        kf.rsjk = None
         return kf
 
     Dg, Pg, Tg, Wg = (cp.asarray(a) for a in (D, P, T, W))
@@ -231,12 +232,13 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         sr_factor=0.0, lr_factor=0.0, omega=0.0, exxdiv=None)
     de += cp.asarray(eJ[0] - eJ[1])
 
-    kaft = _kmf_aft() if need_k else None
-    if need_k and abs(hyb) > 1e-12:
+    if abs(hyb) > 1e-12 or abs(alpha) > 1e-12:
         # hybrid reference exchange K (AFTDF) via the same polarization identity
+        kaft = _kmf_aft()
+
         def dvk(dm):
             return cp.asarray(krhf_g.jk_energy_per_atom(
-                kaft, dm[None], kpts, j_factor=0.0, sr_factor=hyb, lr_factor=hyb,
+                kaft, dm[None], kpts, j_factor=0.0, sr_factor=hyb, lr_factor=alpha,
                 omega=omega, exxdiv=exxdiv))
         de += dvk(Tg) - dvk(Pg)
 
