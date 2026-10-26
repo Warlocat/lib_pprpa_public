@@ -46,6 +46,7 @@ from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
 from lib_pprpa.gpu_emulation import emulation_available, fp64_emulation
 from lib_pprpa.gpu_fft_k import pair_get_k_lowrank
+from lib_pprpa.gpu_mem import pooled
 from lib_pprpa.gpu_pairing_force import pairing_k_force_lowrank
 from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
 
@@ -277,7 +278,10 @@ class Gradients(_cpu.Gradients):
         self.devices = None
 
     def grad_elec(self, xy, mult, atmlst):
-        return grad_elec(self, xy, mult, atmlst)
+        # the grid passes (CPHF response, hcore, Vxc) and the FFT batches allocate blocks
+        # over gpu4pyscf's cudaMalloc threshold every iteration: pool them
+        with pooled():
+            return grad_elec(self, xy, mult, atmlst)
 
 
 Grad = Gradients
