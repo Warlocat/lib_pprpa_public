@@ -6,6 +6,8 @@ from pyscf.df.df_jk import _DFHF
 from pyscf.lib import logger
 from pyscf.df.grad import rhf as rhf_grad
 from lib_pprpa.grad import grad_utils
+from lib_pprpa.pprpa_davidson import ppRPA_Davidson
+from lib_pprpa.pprpa_direct import ppRPA_direct
 from lib_pprpa.pprpa_util import start_clock, stop_clock
 
 
@@ -206,7 +208,7 @@ def make_rdm1_relaxed_rhf_pprpa(
         else:
             xy = pprpa.xy_t[istate]
     nocc_all = mf.mol.nelectron // 2
-    nvir_all = mf.mol.nao - nocc_all
+    nvir_all = len(mf.mo_energy) - nocc_all
     nocc = pprpa.nocc
     nvir = pprpa.nvir
     nfrozen_occ = nocc_all - nocc
@@ -530,8 +532,5 @@ class Gradients(rhf_grad.Gradients):
 
 
 Grad = Gradients
-
-from lib_pprpa.pprpa_direct import ppRPA_direct
-from lib_pprpa.pprpa_davidson import ppRPA_Davidson
 
 ppRPA_direct.Gradients = ppRPA_Davidson.Gradients = lib.class_as_method(Gradients)
