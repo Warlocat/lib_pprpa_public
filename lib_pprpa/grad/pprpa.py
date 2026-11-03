@@ -235,7 +235,7 @@ def make_rdm1_relaxed_rhf_pprpa(
     occ_y_mat, vir_x_mat = get_xy_full(
         xy, oo_dim, mult, nocc=nocc, nvir=nvir)
     use_pair_eri = pprpa._use_eri or pprpa._ao_direct or pair_get_k is not None
-    if pprpa._use_eri and not hasattr(mf, 'cell'):
+    if pprpa._use_eri and pair_get_k is None and not hasattr(mf, 'cell'):
         # molecular fast path: contract 2-RDM with stored MO ERIs directly
         _, mo_ene_full, eri_full = pyscf_util.get_pyscf_input_mol_eri_r(mf, return_raw=True)
         eri_oo = np.ascontiguousarray(eri_full[:, slice_p, slice_i, slice_i])
