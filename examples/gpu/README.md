@@ -29,10 +29,13 @@ MO-eri    (large):  lib_pprpa.gpu_ao2mo.gpu_ao2mo_blocks  -> active-space vvvv/o
 ```
 
 ## Software required
-- **gpu4pyscf** with working CUDA libraries and the periodic
-  `KRKS.gen_response` API (validated at exact upstream commit
-  `d65bd284b4802fc5081b199dec710a5f2d0c56ef`).  The GPU gradient also uses
-  AFTDF `get_k_e1` (hybrid functionals only) and `pbc.grad.krhf` primitives.
+- **gpu4pyscf** at upstream commit `d65bd284b4802fc5081b199dec710a5f2d0c56ef`
+  (between the 1.8.1 release and current master; both FFTDF and GDF paths are
+  validated there) with the upstream GDF-gradient memory fix `a66c7c4`
+  cherry-picked, built from source as below.  No release has the APIs both
+  need: the 1.8.1 wheels lack the local-pseudopotential gradient kernel and the
+  periodic GDF derivatives (`gpu4pyscf.pbc.df.grad`), and later master changed
+  the J/K derivative and three-center integral interfaces.
 - **pyscf** (the periodic `gto`/`dft` driver and `lib_pprpa`).
 - **ase** (the BFGS optimizer used by `ase_utils.kernel`).
 - **lib_pprpa** on `PYTHONPATH`.
@@ -113,31 +116,63 @@ of the script — edit there for a different defect or charge state.
   and `CUPY_ACCELERATORS=cutensor,cub`.
 - Run on a GPU node (login nodes have no GPU).
 
-### CUDA 13 venv (fp64 emulation on Blackwell)
+### CUDA 13 venv with gpu4pyscf d65bd28
 The MO-eri path runs its widest DGEMMs (the ao2mo tiles, and the CPHF response
 on Blackwell) as cuBLAS fp64 emulation where it is faster (`lib_pprpa.gpu_emulation`;
 on by default through `emulate=True` in `gpu_ao2mo_blocks` and `make_gpu_vresp`).
-That needs cuBLAS 13, but `module load` on Bouchet only offers CUDA up to
-`CUDA/12.9.1`, so build a venv from the pip CUDA 13 wheels instead; they ship
-their own CUDA libraries, so no CUDA module is needed at run time:
+That needs cuBLAS 13; the pip CUDA 13 wheels ship it with the rest of the CUDA
+libraries and the compiler, so no CUDA module is needed to build or run.
+gpu4pyscf is not installed from PyPI but built from the pinned commit; a
+`pip install git+...` of it does not work either: its `setup.py` drops
+`gpu4pyscf.pbc.df.grad` (no `__init__.py` at that commit), the default
+architectures include sm_70, which CUDA 13 no longer compiles, and the CMake
+project needs a Fortran compiler.  Build it in place and put the checkout on
+the venv's path:
 ```bash
 uv venv --python 3.10 ~/venv_cu13
-uv pip install --python ~/venv_cu13/bin/python \
-    cupy-cuda13x==14.2.0 gpu4pyscf-cuda13x==1.8.1 gpu4pyscf-libxc-cuda13x==0.8.1 \
-    pyscf==2.14.0 ase cutensor-cu13 \
-    nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-nvjitlink \
-    nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse
+uv pip install --python ~/venv_cu13/bin/python     cupy-cuda13x==14.2.0 gpu4pyscf-libxc-cuda13x==0.8.1 pyscf==2.14.0     pyscf-dispersion geometric packaging 'numpy<=2.3' h5py scipy ase cutensor-cu13     nvidia-cublas nvidia-cuda-runtime nvidia-cuda-nvrtc nvidia-nvjitlink     nvidia-cufft nvidia-curand nvidia-cusolver nvidia-cusparse
+# the compiler wheels at the installed runtime's version, CUB headers and CMake
+RT=$(uv pip list --python ~/venv_cu13/bin/python | awk '$1=="nvidia-cuda-runtime"{print $2}')
+uv pip install --python ~/venv_cu13/bin/python nvidia-cuda-nvcc==$RT nvidia-cuda-crt==$RT     nvidia-nvvm==$RT nvidia-cuda-cccl 'cmake>=3.21,<4'
+
+git clone https://github.com/pyscf/gpu4pyscf ~/gpu4pyscf_d65
+git -C ~/gpu4pyscf_d65 checkout -b d65bd28-a66c7c4 d65bd284b4802fc5081b199dec710a5f2d0c56ef
+git -C ~/gpu4pyscf_d65 cherry-pick -x a66c7c4bd84509c585c3326f15346de755af7b41
+SP=~/venv_cu13/lib/python3.10/site-packages
+CU=$SP/nvidia/cu13
+PATH=$CU/bin:~/venv_cu13/bin:$PATH cmake -S ~/gpu4pyscf_d65/gpu4pyscf/lib -B ~/gpu4pyscf_d65/build     -DBUILD_LIBXC=OFF -DCUDA_ARCHITECTURES="80-real;90-real;100-real" -DCMAKE_BUILD_TYPE=Release     -DCMAKE_CUDA_COMPILER=$CU/bin/nvcc -DCUDAToolkit_ROOT=$CU     -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++     -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++ -DCMAKE_Fortran_COMPILER=$(command -v gfortran)
+PATH=$CU/bin:~/venv_cu13/bin:$PATH cmake --build ~/gpu4pyscf_d65/build -j 12
+echo ~/gpu4pyscf_d65 > $SP/gpu4pyscf_d65.pth
+ln -s libcusolver.so.12 $CU/lib/libcusolver.so
+
 uv pip install --python ~/venv_cu13/bin/python --no-deps -e /path/to/lib_pprpa
-export LD_LIBRARY_PATH=~/venv_cu13/lib/python3.10/site-packages/cutensor/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$CU/lib:$SP/cutensor/lib:$LD_LIBRARY_PATH
 ```
-- List the `nvidia-*` runtime wheels explicitly: installing only cupy and
-  gpu4pyscf leaves out cuSOLVER and nvJitLink, `import gpu4pyscf` fails, and
-  pytest then skips every GPU test.
+- The cherry-pick is upstream #907 (Python only), the fix for the GDF
+  gradient running out of device memory in the pair-density exchange: without
+  it the 63-atom NV cell (gth-dzvp, naux 5292) OOMs even on a 180 GB B200.
+- `CUDA_ARCHITECTURES` lists the GPUs to run on: `80` A100, `90` H100/H200,
+  `100` B200.  The build takes about 10 min on 12 cores.
+- CMake's `project()` declares Fortran although only the bundled libxc (off
+  here; the `gpu4pyscf-libxc-cuda13x` wheel provides it) uses it, so a
+  `gfortran` must be on the path (on a cluster, from a GCC module).  Keep the
+  system `gcc`/`g++` so the libraries need only the system `libstdc++`.
+- `nvidia-cuda-cccl` provides `cub/cub.cuh`, which the `nvcc` wheel lacks.
+- gpu4pyscf loads cuSOLVER through `find_library('cusolver')`, which needs the
+  unversioned `libcusolver.so` on `LD_LIBRARY_PATH`; the wheel ships only
+  `libcusolver.so.12`, hence the link.
+- Install `lib_pprpa` with `--no-deps` (or with the `gpu-cuda13` extra, which
+  lists the wheels above but not gpu4pyscf): the checkout is not a pip
+  distribution, so a `gpu4pyscf` requirement would pull a release next to it.
+- List the `nvidia-*` runtime wheels explicitly: installing only cupy leaves out
+  cuSOLVER and nvJitLink, `import gpu4pyscf` fails, and pytest then skips
+  every GPU test.
 - Do not set `CUBLAS_EMULATE_DOUBLE_PRECISION`: it emulates every DGEMM in the
   process and slows the SCF and CPHF.  Leave `CUPY_ACCELERATORS` unset as well
   (cuTENSOR 2.8.1 rejects a strided accumulate in `gpu_pairing_force`).
-- Under CUDA 12 the switch is a no-op, so the same code runs in either venv.
-  Hopper gains only on very wide tiles; Blackwell gains from ~800-pair strips up.
+- Under CUDA 12 the switch is a no-op, so the same code runs with a CUDA 12
+  build of the same commit.  Hopper gains only on very wide tiles; Blackwell
+  gains from ~800-pair strips up.
 
 ## Scope / notes
 - Gamma point, RKS/RHF reference, LDA/GGA/hybrid functionals.

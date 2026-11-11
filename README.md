@@ -34,6 +34,23 @@ Method 2 is recommended for new users, as it is [standard practice](https://docs
 Consult [the pip documentation](https://pip.pypa.io/en/stable/cli/pip_install/) for further information
 about command-line options for pip.
 
+#### GPU support
+The GPU modules (`lib_pprpa.gpu_*`, `lib_pprpa.pprpa_eri_gpu`, `lib_pprpa.grad.pprpa_gamma_gpu`,
+`lib_pprpa.grad.pprpa_gamma_gdf_gpu`) need an NVIDIA GPU and [GPU4PySCF](https://github.com/pyscf/gpu4pyscf)
+at commit `d65bd284` (with the GDF-gradient memory fix `a66c7c4` cherry-picked), built from source:
+no release has the APIs they use, and a `pip install` from git leaves out the periodic GDF
+derivatives. `examples/gpu/README.md` has the build. The
+extras install everything else: `gpu-cuda13` (CuPy, GPU4PySCF's libxc and the CUDA 13 libraries
+as wheels, which cuBLAS's fp64 emulation in `lib_pprpa.gpu_emulation` needs) or `gpu` (CUDA 12
+toolkit on the system; those GEMMs then run in plain fp64):
+```
+pip install -e ".[gpu-cuda13]"   # CUDA 13
+pip install -e ".[gpu]"          # CUDA 12
+```
+Check the installation with
+`python -c "import gpu4pyscf, cupy; print(cupy.cuda.runtime.getDeviceCount())"` and run the GPU
+tests with `pytest tests`.
+
 Features
 --------
 

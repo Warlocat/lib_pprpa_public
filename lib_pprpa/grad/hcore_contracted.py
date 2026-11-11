@@ -15,13 +15,12 @@ reciprocal-space dot product by Parseval's theorem.  The remaining h1 slice
 terms, the AO-centre derivative of the kinetic and local pseudopotential
 integrals, are cheap slices of the derivative integrals of ``get_hcore``.
 
-The plane-wave sum is blocked.  The unblocked form holds several
-``(natm, ngrids)`` complex arrays at once, which for a 215-atom cell with
-1.7e7 plane waves is about 200 GB and exceeds any single GPU; blocking bounds
-peak memory without changing the arithmetic or the per-element reduction
-order.  The same blocks give the total local potential, so the derivative
-integrals are built here rather than by ``gpu4pyscf.pbc.grad.krhf.get_hcore``,
-which forms those ``(natm, ngrids)`` arrays whole.
+The local pseudopotential terms come from gpu4pyscf's reciprocal-space kernels
+(``multigrid.eval_vpplocG`` and ``multigrid_v3._pploc_derivatives``), which never form
+``(natm, ngrids)`` arrays; for all-electron cells the nuclear Coulomb sum is blocked
+over plane waves instead.  The total local potential feeds the AO-centre terms, so
+the derivative integrals are built here rather than by
+``gpu4pyscf.pbc.grad.krhf.get_hcore``.
 
 Gamma point only.
 """
@@ -33,8 +32,9 @@ from gpu4pyscf.lib.cupy_helper import contract
 from gpu4pyscf.pbc import tools
 from gpu4pyscf.pbc.dft import numint as pbc_numint
 from gpu4pyscf.pbc.dft.gen_grid import UniformGrids
+from gpu4pyscf.pbc.dft.multigrid import eval_vpplocG
+from gpu4pyscf.pbc.dft.multigrid_v3 import _get_Gv_bases, _pploc_derivatives
 from gpu4pyscf.pbc.gto import int1e
-from pyscf.pbc.gto.pseudo.pp import get_alphas, get_vlocG
 from gpu4pyscf.pbc.tools.pbc import get_coulG
 
 
@@ -47,7 +47,7 @@ def hcore_deriv_contracted(cell, kpts, dm):
     kpts = np.asarray(kpts).reshape(-1, 3)
     if len(kpts) != 1 or abs(kpts).max() > 0:
         raise NotImplementedError("hcore_deriv_contracted is Gamma-point only")
-    natm, nao = cell.natm, cell.nao
+    natm = cell.natm
     mesh = cell.mesh
     ngrids = int(np.prod(mesh))
     dm = cp.asarray(dm)
@@ -68,40 +68,16 @@ def hcore_deriv_contracted(cell, kpts, dm):
     rho_G = tools.fft(rho_unsorted, mesh)            # unnormalised, as numpy
 
     # --- per-atom reciprocal-space dot: sum_g vloc_R rho = (1/N) Re sum_G vloc_g^* rho_G
-    Gv = cp.asarray(cell.Gv)                          # (nG, 3)
-    # Blocked over plane waves.  The unblocked form holds several (natm, nG)
-    # complex arrays simultaneously -- for NV215 (215 atoms, 17,373,979 plane
-    # waves) each is 60 GB, so it asks for ~200 GB and dies on any single GPU.
-    # Blocking changes no arithmetic and no reduction order per element; it
-    # only bounds peak memory.  Verified bit-identical on NV63.
-    atom_coords = cp.asarray(cell.atom_coords())      # (natm, 3)
-    Z = None if cell._pseudo else cp.asarray(cell.atom_charges(), dtype=cp.float64)
-    # get_coulG zeroes the first G it is given as G = 0, so it takes the whole mesh
-    coulG = None if cell._pseudo else get_coulG(cell, mesh=mesh, Gv=Gv)
-    vG = cp.empty(ngrids, dtype=cp.complex128)        # total local potential in G space
-    # at most 6 (natm, blk) complex arrays live at once (counted 5.5: SI_b, vlocG_b,
-    # coef_b and the temporaries of its product with rho_G)
-    bytes_per_g = max(1, natm * 16 * 6)
-    blk = int(max(1, min(ngrids, plan_budget(free_bytes()) // bytes_per_g)))
-    de = cp.zeros((natm, 3))
-    for g0 in range(0, ngrids, blk):
-        g1 = min(g0 + blk, ngrids)
-        Gv_b = Gv[g0:g1]
-        # SI[a,g] = exp(-i G_g . R_a), same convention as aft.get_SI
-        SI_b = cp.exp(-1j * (atom_coords @ Gv_b.T))   # (natm, blk)
-        if cell._pseudo:
-            vlocG_b = cp.asarray(get_vlocG(cell, cp.asnumpy(Gv_b)))
-            coef_b = 1j * SI_b * vlocG_b
-        else:
-            coef_b = 1j * Z[:, None] * SI_b * coulG[g0:g1]
-        # vloc_g[A,x,G] = Gv[G,x] * coef[A,G]
-        de += cp.einsum('gx,ag->ax', Gv_b, (coef_b.conj() * rho_G[g0:g1])).real
-        # get_hcore's -sum_a SI vlocG (pseudo) and -sum_a Z SI coulG (all-electron)
-        vG[g0:g1] = 1j * coef_b.sum(axis=0)
-        SI_b = coef_b = vlocG_b = None
-    de /= ngrids
     if cell._pseudo:
-        vG[0] = np.sum(get_alphas(cell))
+        # gpu4pyscf's local-pseudopotential kernels: one Gaussian factor per atom from separable
+        # structure factors on the device.  The gradient takes rho(G) scaled to the cell
+        # volume and returns the (natm, 3) atom gradient and the strain; vG, G = 0 included,
+        # is the total local potential of get_hcore.
+        Gv_bases = _get_Gv_bases(mesh, cell.reciprocal_vectors())
+        de = _pploc_derivatives(cell, rho_G * (cell.vol / ngrids), Gv_bases)[0]
+        vG = eval_vpplocG(cell, mesh)
+    else:
+        de, vG = _nuclear_coulomb(cell, mesh, rho_G)
 
     # --- AO-centre (h1 slice) terms ---------------------------------------
     # (nk, 3, nao, nao) derivative integrals, as gpu4pyscf.pbc.grad.krhf.get_hcore
@@ -121,3 +97,35 @@ def hcore_deriv_contracted(cell, kpts, dm):
         # hcore[:,:,:,p0:p1] -= h1[:,:,p0:p1].T.conj() -> -sum_{j in A} conj(h1[x,j,i]) dm[j,i]
         de[ia] -= cp.einsum('xji,ji->x', h1[0, :, p0:p1, :].conj(), dm[p0:p1, :]).real
     return cp.asnumpy(de)
+
+
+def _nuclear_coulomb(cell, mesh, rho_G):
+    '''All-electron analogue of the local-pseudopotential terms: the per-atom gradient
+    (natm, 3) and the total nuclear potential -sum_a Z_a SI_a coulG in G space.
+
+    Blocked over plane waves: the unblocked form holds several (natm, nG) complex arrays at
+    once.  Blocking changes no arithmetic and no reduction order per element.
+    '''
+    natm = cell.natm
+    ngrids = int(np.prod(mesh))
+    Gv = cp.asarray(cell.get_Gv(mesh))                 # (nG, 3)
+    atom_coords = cp.asarray(cell.atom_coords())       # (natm, 3)
+    Z = cp.asarray(cell.atom_charges(), dtype=cp.float64)
+    # get_coulG zeroes the first G it is given as G = 0, so it takes the whole mesh
+    coulG = get_coulG(cell, mesh=mesh, Gv=Gv)
+    vG = cp.empty(ngrids, dtype=cp.complex128)
+    # at most 6 (natm, blk) complex arrays live at once (SI_b, coef_b and the
+    # temporaries of its product with rho_G)
+    blk = int(max(1, min(ngrids, plan_budget(free_bytes()) // max(1, natm * 16 * 6))))
+    de = cp.zeros((natm, 3))
+    for g0 in range(0, ngrids, blk):
+        g1 = min(g0 + blk, ngrids)
+        Gv_b = Gv[g0:g1]
+        # SI[a,g] = exp(-i G_g . R_a), same convention as aft.get_SI
+        SI_b = cp.exp(-1j * (atom_coords @ Gv_b.T))   # (natm, blk)
+        coef_b = 1j * Z[:, None] * SI_b * coulG[g0:g1]
+        # vloc_g[A,x,G] = Gv[G,x] * coef[A,G]
+        de += cp.einsum('gx,ag->ax', Gv_b, (coef_b.conj() * rho_G[g0:g1])).real
+        vG[g0:g1] = 1j * coef_b.sum(axis=0)            # -sum_a Z SI coulG
+        SI_b = coef_b = None
+    return de / ngrids, vG
