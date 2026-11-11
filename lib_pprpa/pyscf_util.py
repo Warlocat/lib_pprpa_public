@@ -5,7 +5,7 @@ import scipy
 
 import pyscf
 import pyscf.dft
-from pyscf.lib import unpack_tril
+from pyscf.lib import pack_tril, unpack_tril
 from pyscf import df
 from pyscf.ao2mo import _ao2mo
 
@@ -988,7 +988,7 @@ def create_frac_scf_object(mf, frac_spin, frac_orb, frac_occ):
 
 def get_pyscf_input_mol_eri_r(
         mf, nocc_act=None, nvir_act=None, dump_file=None,
-        sort_mo=False, incore=True, return_raw=False):
+        sort_mo=False, incore=True, return_raw=False, packed=False):
     """Get ppRPA use eri input from a PySCF molecular SCF calculation.
 
     Args:
@@ -997,6 +997,10 @@ def get_pyscf_input_mol_eri_r(
         nvir_act (int, optional): number of active virtual orbitals. Defaults to None.
         dump_file (str, optional): file name to dump matrix for lib_pprpa. Defaults to None.
         return_raw (bool, optional): whether to return raw four-center integrals.
+        packed (bool, optional): return the packed Gram triangles that
+            ppRPA_Davidson.use_eri keeps (``pair_operator.pack_eri`` format), each
+            transformed on its own, instead of the four-index blocks of the whole
+            active space.
 
     Returns:
         nocc_act (int): number of occupied orbitals in the active space.
@@ -1037,7 +1041,17 @@ def get_pyscf_input_mol_eri_r(
     mo_energy_act = mo_energy[(nocc-nocc_act):(nocc+nvir_act)]
 
     from pyscf import ao2mo
-    if incore:
+    if incore and packed:
+        if dump_file is not None or return_raw:
+            raise ValueError("packed=True returns only the Gram blocks (no dump_file, "
+                             "return_raw)")
+        co = mo_coeff[:, (nocc-nocc_act):nocc]
+        cv = mo_coeff[:, nocc:(nocc+nvir_act)]
+        # (pq|rs) over the compact pairs p >= q of vvvv / oooo and over (i, a) of oovv
+        vvvv = pack_tril(ao2mo.incore.full(mf._eri, cv))
+        oooo = pack_tril(ao2mo.incore.full(mf._eri, co))
+        oovv = pack_tril(ao2mo.incore.general(mf._eri, (co, cv, co, cv), compact=False))
+    elif incore:
         eri_raw = ao2mo.incore.full(mf._eri, mo_coeff[:,(nocc-nocc_act):(nocc+nvir_act)])
         if dump_file is not None:
             f = h5py.File(name="%s.h5" % dump_file, mode="w")

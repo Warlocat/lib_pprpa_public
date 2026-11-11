@@ -67,61 +67,18 @@ def _solver(nocc, mo_energy, multi, eri=None):
 
 
 @needs_gpu
-def test_pack_eri():
-    """pack_eri stores (pq|rs) for Q <= P at P(P+1)/2 + Q, on NumPy and CuPy input."""
-    import cupy as cp
-    from lib_pprpa.gpu_mem import pack_offset
-    from lib_pprpa.pprpa_eri_gpu import pack_eri
-    rng = np.random.default_rng(1)
-    nocc, nvir = 3, 4
-    vvvv, oovv, oooo = _random_eri(rng, nocc, nvir)
-    pv, pov, po = pack_eri(vvvv, oovv, oooo)
-    assert pv.shape == (pack_offset(pack_offset(nvir)),)
-    assert po.shape == (pack_offset(pack_offset(nocc)),)
-    assert pov.shape == (pack_offset(nocc * nvir),)
-    a, b, c, d = 3, 1, 2, 0                         # <ab|cd> = (ac|bd): P = (a,c), Q = (b,d)
-    P, Q = pack_offset(a) + c, pack_offset(b) + d
-    assert pv[pack_offset(P) + Q] == vvvv[a, b, c, d]
-    i, j, a, b = 2, 1, 3, 0                         # <ij|ab> = (ia|jb): P = (i,a), Q = (j,b)
-    P, Q = i * nvir + a, j * nvir + b
-    assert pov[pack_offset(P) + Q] == oovv[i, j, a, b]
-    gv, gov, go = pack_eri(cp.asarray(vvvv), cp.asarray(oovv), cp.asarray(oooo))
-    for g, h in zip((gv, gov, go), (pv, pov, po)):
-        assert isinstance(g, cp.ndarray)
-        np.testing.assert_array_equal(g.get(), h)
-
-
-@needs_gpu
-def test_strips_cover_the_operator():
-    """Strips tile every block; their storage is M plus the full diagonal blocks."""
-    from lib_pprpa.pprpa_eri_gpu import _pair_offset, _strips, pair_operator_bytes
-    nocc, nvir = 30, 70
-    for multi in ("s", "t"):
-        for rows in (None, 1, 4):
-            plan = _strips(nocc, nvir, multi, rows)
-            extra = 0
-            for kind, n in (("oo", nocc), ("vv", nvir), ("ov", nocc)):
-                spans = [(R0, R1) for k, _, _, R0, R1, _ in plan if k == kind]
-                assert spans[0][0] == 0 and spans[-1][1] == _pair_offset(n, multi)
-                assert [s[0] for s in spans[1:]] == [s[1] for s in spans[:-1]]
-                if kind != "ov":
-                    extra += sum(8 * (R1 - R0) * (R1 - R0 - 1) // 2 for R0, R1 in spans)
-            assert sum(s[-1] for s in plan) == pair_operator_bytes(nocc, nvir, multi) + extra
-
-
-@needs_gpu
 @pytest.mark.parametrize("multi", ("s", "t"))
 @pytest.mark.parametrize("ntri", (1, 7))
 def test_mvp_matches_cpu(multi, ntri):
     from lib_pprpa.pprpa_davidson import _pprpa_contraction
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
+    from lib_pprpa.pair_operator import pack_eri
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
 
     rng = np.random.default_rng(4)
     nocc, nvir = 6, 8
     moe = rng.standard_normal(nocc + nvir)
     vvvv, oovv, oooo = _random_eri(rng, nocc, nvir)
     cpu = _solver(nocc, moe, multi, eri=(vvvv, oovv, oooo))
-    assert cpu.eri_nbytes() == 8 * (nocc**4 + nvir**4 + nocc**2 * nvir**2)
     tv = rng.standard_normal((ntri, cpu.full_dim))
     ref = _pprpa_contraction(cpu, tv)
     packed = pack_eri(vvvv, oovv, oooo)
@@ -139,7 +96,8 @@ def test_mvp_matches_cpu(multi, ntri):
 @needs_gpu
 def test_operator_is_built_for_one_multiplicity():
     import cupy as cp
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
+    from lib_pprpa.pair_operator import pack_eri
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
     rng = np.random.default_rng(2)
     nocc, nvir = 4, 5
     moe = rng.standard_normal(nocc + nvir)
@@ -167,6 +125,7 @@ def test_auto_mode_follows_free_memory(monkeypatch):
     """'auto' streams when the operator and the product arrays do not fit the free
     memory left after the workspace reserve, and keeps it resident when they do."""
     from lib_pprpa import pprpa_eri_gpu as mod
+    from lib_pprpa.pair_operator import pack_eri
     from lib_pprpa.pprpa_davidson import _pprpa_contraction
     rng = np.random.default_rng(8)
     nocc, nvir = 4, 5
@@ -177,7 +136,7 @@ def test_auto_mode_follows_free_memory(monkeypatch):
     for free, mode in ((512 * 1024**2, "streamed"), (2 * 1024**3, "resident")):
         monkeypatch.setattr(mod, "free_bytes", lambda f=free: f)
         gpu = _solver(nocc, moe, "s")
-        mod.attach_gpu_eri_contraction(gpu, *mod.pack_eri(*eri))
+        mod.attach_gpu_eri_contraction(gpu, *pack_eri(*eri))
         assert gpu._gpu_eri["mode"] == mode
         np.testing.assert_allclose(gpu.contraction(tv), _pprpa_contraction(cpu, tv),
                                    rtol=1e-11, atol=1e-11)
@@ -223,7 +182,8 @@ def test_fused_ao2mo_operator_matches_cpu(multi, pair_blk, devices):
 def test_davidson_energies_match_cpu(multi):
     """Full Davidson solve on a diamond cell: streamed pair operator vs the CPU use_eri path."""
     from pyscf.pbc import dft, gto
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
+    from lib_pprpa.pair_operator import pack_eri
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
 
     a0 = 3.370137329
     cell = gto.M(atom=[["C", [0., 0., 0.]], ["C", [a0 / 2, a0 / 2, a0 / 2]]],

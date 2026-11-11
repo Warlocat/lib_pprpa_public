@@ -5,6 +5,8 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from lib_pprpa.analyze import pprpa_print_a_pair, get_pprpa_oscillator_strength
+from lib_pprpa.pair_operator import apply_pair_operator, check_gram, operator_strips, \
+    pack_eri, pair_operator
 from lib_pprpa.pprpa_direct import pprpa_orthonormalize_eigenvector, \
     diagonalize_pprpa_singlet, diagonalize_pprpa_triplet
 
@@ -13,9 +15,7 @@ from lib_pprpa.pprpa_util import ij2index, inner_product, start_clock, \
 
 def kernel(pprpa):
     # initialize trial vector and product matrix
-    if pprpa._use_eri:
-        data_type = pprpa.vvvv.dtype
-    elif pprpa._ao_direct:
+    if pprpa._use_eri or pprpa._ao_direct:
         data_type = np.double
     else:
         if pprpa.Loo is not None:
@@ -307,6 +307,15 @@ def get_subspace_trial_vector(pprpa, ntri, channel=None, nocc_sub=40, nvir_sub=4
     return tri_vec, tri_vec_sig
 
 
+def _eri_operator(pprpa):
+    """The pair-space operator of the solver's multiplicity, built from the Gram blocks
+    when the multiplicity changes (the previous one is dropped first)."""
+    if pprpa._pair_op is None or pprpa._pair_op.multi != pprpa.multi:
+        pprpa._pair_op = None
+        pprpa._pair_op = pair_operator(*pprpa.eri_gram, pprpa.nocc, pprpa.nvir, pprpa.multi)
+    return pprpa._pair_op
+
+
 def _pprpa_contraction(pprpa, tri_vec):
     """ppRPA contraction.
 
@@ -344,7 +353,9 @@ def _pprpa_contraction(pprpa, tri_vec):
     prod_oo = np.zeros(shape=[nocc, nocc], dtype=np.double)
     prod_vv = np.zeros(shape=[nvir, nvir], dtype=np.double)
 
-    if not pprpa._ao_direct: # Lpq or eri
+    if pprpa._use_eri:
+        mv_prod[:] = apply_pair_operator(_eri_operator(pprpa), tri_vec.T).T
+    elif not pprpa._ao_direct: # Lpq
         for ivec in range(ntri):
             # restore trial vector into full matrix
             z_oo[tri_row_o, tri_col_o] = tri_vec[ivec][: pprpa.oo_dim]
@@ -354,126 +365,113 @@ def _pprpa_contraction(pprpa, tri_vec):
             # z_vv[np.diag_indices(nvir)] *= 1.0 / np.sqrt(2)
             scipy.linalg.blas.dscal(a=1.0 / np.sqrt(2), x=z_vv.ravel(), n=nvir, offx=0, incx=nvir + 1)
 
-            if pprpa._use_eri:
-                prod_vv = np.zeros((nvir*nvir, 1))
-                prod_oo = np.zeros((nocc*nocc, 1))
-                if nvir > 0:
-                    prod_vv += np.matmul(pprpa.vvvv.reshape(nvir*nvir, nvir*nvir), z_vv.T.reshape(nvir*nvir, 1))
-                if nocc > 0:
-                    prod_oo += np.matmul(pprpa.oooo.reshape(nocc*nocc, nocc*nocc), z_oo.T.reshape(nocc*nocc, 1))
-                if nvir > 0 and nocc > 0:
-                    prod_vv += np.matmul(pprpa.oovv.reshape(nocc*nocc, nvir*nvir).T, z_oo.T.reshape(nocc*nocc, 1))
-                    prod_oo += np.matmul(pprpa.oovv.reshape(nocc*nocc, nvir*nvir), z_vv.T.reshape(nvir*nvir, 1))
-                prod_vv = prod_vv.reshape(nvir, nvir)
-                prod_oo = prod_oo.reshape(nocc, nocc)
-            else:
-                # version 1: using einsum, slow but indexes are easy to understand
-                # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
-                # Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
-                # Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
-                # Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
-                # version 2: using np.matmul, faster, helpful to understand version 3
-                # np.matmul(pprpa.oLo.reshape(nocc * naux, nocc), z_oo.T, out=oLo_z)
-                # np.matmul(pprpa.oLv.reshape(nocc * naux, nvir), z_vv.T, out=oLv_z)
-                # np.matmul(pprpa.vLo.reshape(nvir * naux, nocc), z_oo.T, out=vLo_z)
-                # np.matmul(pprpa.vLv.reshape(nvir * naux, nvir), z_vv.T, out=vLv_z)
+            # version 1: using einsum, slow but indexes are easy to understand
+            # Lpqz_{L,pr} = \sum_s Lpq_{L,ps} z_{rs}
+            # Lpq_z = np.zeros(shape=[naux * nmo, nmo], dtype=np.double)
+            # Lpq_z[:, :nocc] = Lpi.reshape(naux * nmo, nocc) @ z_oo.T
+            # Lpq_z[:, nocc:] = Lpa.reshape(naux * nmo, nvir) @ z_vv.T
+            # version 2: using np.matmul, faster, helpful to understand version 3
+            # np.matmul(pprpa.oLo.reshape(nocc * naux, nocc), z_oo.T, out=oLo_z)
+            # np.matmul(pprpa.oLv.reshape(nocc * naux, nvir), z_vv.T, out=oLv_z)
+            # np.matmul(pprpa.vLo.reshape(nvir * naux, nocc), z_oo.T, out=vLo_z)
+            # np.matmul(pprpa.vLv.reshape(nvir * naux, nvir), z_vv.T, out=vLv_z)
 
-                # version 3: using BLAS, fastest
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=z_oo.T,
-                    b=pprpa.oLo.reshape(nocc * naux, nocc).T,
-                    c=oLo_z.T,
-                    beta=0.0,
-                    overwrite_c=True,
-                    trans_a=True,
-                    trans_b=False
-                )
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=z_vv.T,
-                    b=pprpa.oLv.reshape(nocc * naux, nvir).T,
-                    c=oLv_z.T,
-                    beta=0.0,
-                    overwrite_c=True,
-                    trans_a=True,
-                    trans_b=False
-                )
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=z_oo.T,
-                    b=pprpa.vLo.reshape(nvir * naux, nocc).T,
-                    c=vLo_z.T,
-                    beta=0.0,
-                    overwrite_c=True,
-                    trans_a=True,
-                    trans_b=False
-                )
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=z_vv.T,
-                    b=pprpa.vLv.reshape(nvir * naux, nvir).T,
-                    c=vLv_z.T,
-                    beta=0.0,
-                    overwrite_c=True,
-                    trans_a=True,
-                    trans_b=False
-                )
+            # version 3: using BLAS, fastest
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=z_oo.T,
+                b=pprpa.oLo.reshape(nocc * naux, nocc).T,
+                c=oLo_z.T,
+                beta=0.0,
+                overwrite_c=True,
+                trans_a=True,
+                trans_b=False
+            )
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=z_vv.T,
+                b=pprpa.oLv.reshape(nocc * naux, nvir).T,
+                c=oLv_z.T,
+                beta=0.0,
+                overwrite_c=True,
+                trans_a=True,
+                trans_b=False
+            )
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=z_oo.T,
+                b=pprpa.vLo.reshape(nvir * naux, nocc).T,
+                c=vLo_z.T,
+                beta=0.0,
+                overwrite_c=True,
+                trans_a=True,
+                trans_b=False
+            )
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=z_vv.T,
+                b=pprpa.vLv.reshape(nvir * naux, nvir).T,
+                c=vLv_z.T,
+                beta=0.0,
+                overwrite_c=True,
+                trans_a=True,
+                trans_b=False
+            )
 
-                # version 1: using einsum, slow but indexes are easy to understand
-                # transpose and reshape for faster multiplication
-                # Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
-                # Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
-                # here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
-                # prod_oo = Lpq_z[:nocc] @ Lpi.reshape(naux * nmo, nocc)
-                # prod_vv = Lpq_z[nocc:] @ Lpa.reshape(naux * nmo, nvir)
-                # version 2: using np.matmul, faster, helpful to understand version 3
-                # prod_oo = oLo_z.reshape(nocc, -1) @ pprpa.Loo.reshape(naux * nocc, nocc)
-                # prod_oo += oLv_z.reshape(nocc, -1) @ pprpa.Lvo.reshape(naux * nvir, nocc)
-                # prod_vv = vLo_z.reshape(nvir, -1) @ pprpa.Lov.reshape(naux * nocc, nvir)
-                # prod_vv += vLv_z.reshape(nvir, -1) @ pprpa.Lvv.reshape(naux * nvir, nvir)
+            # version 1: using einsum, slow but indexes are easy to understand
+            # transpose and reshape for faster multiplication
+            # Lpq_z = Lpq_z.reshape(naux, nmo, nmo).transpose(1, 0, 2)
+            # Lpq_z = Lpq_z.reshape(nmo, naux * nmo)
+            # here assuming Lpq[L,p,q] = Lpq[L,q,p] for real orbitals
+            # prod_oo = Lpq_z[:nocc] @ Lpi.reshape(naux * nmo, nocc)
+            # prod_vv = Lpq_z[nocc:] @ Lpa.reshape(naux * nmo, nvir)
+            # version 2: using np.matmul, faster, helpful to understand version 3
+            # prod_oo = oLo_z.reshape(nocc, -1) @ pprpa.Loo.reshape(naux * nocc, nocc)
+            # prod_oo += oLv_z.reshape(nocc, -1) @ pprpa.Lvo.reshape(naux * nvir, nocc)
+            # prod_vv = vLo_z.reshape(nvir, -1) @ pprpa.Lov.reshape(naux * nocc, nvir)
+            # prod_vv += vLv_z.reshape(nvir, -1) @ pprpa.Lvv.reshape(naux * nvir, nvir)
 
-                # version 3: using BLAS, fastest
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=pprpa.Loo.reshape(naux * nocc, nocc).T,
-                    b=oLo_z.reshape(nocc, -1).T,
-                    c=prod_oo.T,
-                    beta=0.0,
-                    overwrite_c=True,
-                    trans_a=False,
-                    trans_b=False
-                )
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=pprpa.Lvo.reshape(naux * nvir, nocc).T,
-                    b=oLv_z.reshape(nocc, -1).T,
-                    c=prod_oo.T,
-                    beta=1.0,
-                    overwrite_c=True,
-                    trans_a=False,
-                    trans_b=False
-                )
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=pprpa.Lov.reshape(naux * nocc, nvir).T,
-                    b=vLo_z.reshape(nvir, -1).T,
-                    c=prod_vv.T,
-                    beta=0.0,
-                    overwrite_c=True,
-                    trans_a=False,
-                    trans_b=False
-                )
-                scipy.linalg.blas.dgemm(
-                    alpha=1.0,
-                    a=pprpa.Lvv.reshape(naux * nvir, nvir).T,
-                    b=vLv_z.reshape(nvir, -1).T,
-                    c=prod_vv.T,
-                    beta=1.0,
-                    overwrite_c=True,
-                    trans_a=False,
-                    trans_b=False
-                )
+            # version 3: using BLAS, fastest
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=pprpa.Loo.reshape(naux * nocc, nocc).T,
+                b=oLo_z.reshape(nocc, -1).T,
+                c=prod_oo.T,
+                beta=0.0,
+                overwrite_c=True,
+                trans_a=False,
+                trans_b=False
+            )
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=pprpa.Lvo.reshape(naux * nvir, nocc).T,
+                b=oLv_z.reshape(nocc, -1).T,
+                c=prod_oo.T,
+                beta=1.0,
+                overwrite_c=True,
+                trans_a=False,
+                trans_b=False
+            )
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=pprpa.Lov.reshape(naux * nocc, nvir).T,
+                b=vLo_z.reshape(nvir, -1).T,
+                c=prod_vv.T,
+                beta=0.0,
+                overwrite_c=True,
+                trans_a=False,
+                trans_b=False
+            )
+            scipy.linalg.blas.dgemm(
+                alpha=1.0,
+                a=pprpa.Lvv.reshape(naux * nvir, nvir).T,
+                b=vLv_z.reshape(nvir, -1).T,
+                c=prod_vv.T,
+                beta=1.0,
+                overwrite_c=True,
+                trans_a=False,
+                trans_b=False
+            )
 
             if pprpa.multi == "s":
                 prod_vv += prod_vv.T
@@ -1047,7 +1045,9 @@ class ppRPA_Davidson():
         self.oLv = None
         self.vLv = None
 
-        self._use_eri = False # use four-index ERI tensor directly
+        self._use_eri = False # use the active-space four-index ERIs (use_eri)
+        self.eri_gram = None # packed Gram blocks vvvv, oovv, oooo (use_eri)
+        self._pair_op = None # pair-space operator of the last multiplicity (use_eri)
         self._ao_direct = False # use four-index from fock builder
         self.mo_coeff = None # molecular orbital coefficients
         self._scf = None  # SCF object, needed when using eri in AO basis
@@ -1162,12 +1162,18 @@ class ppRPA_Davidson():
         return
 
     def use_eri(self, eri_vvvv, eri_oovv, eri_oooo):
-        """Use ERI instead of Lpq."""
-        """ERI symmetry <pq|rs>"""
+        """Use the active-space ERIs instead of Lpq: the physicist blocks <pq|rs>, or
+        their packed Gram triangles (``pair_operator.gram_from_lpq``,
+        ``pyscf_util.get_pyscf_input_mol_eri_r(packed=True)``), which are kept as given.
+        The pair-space operator of each multiplicity is built from them at its first
+        product."""
         self._use_eri = True
-        self.vvvv = np.ascontiguousarray(eri_vvvv)
-        self.oovv = np.ascontiguousarray(eri_oovv)
-        self.oooo = np.ascontiguousarray(eri_oooo)
+        blocks = (eri_vvvv, eri_oovv, eri_oooo)
+        if all(np.ndim(block) == 1 for block in blocks):
+            self.eri_gram = check_gram(*blocks, self.nocc, self.nvir)
+        else:
+            self.eri_gram = pack_eri(*blocks)
+        self._pair_op = None
         return
 
     def kernel(self, multi):
@@ -1307,5 +1313,7 @@ class ppRPA_Davidson():
         return _pprpa_contraction(self, tri_vec)
 
     def eri_nbytes(self):
-        """Bytes of the ERIs that contraction reads (use_eri)."""
-        return self.vvvv.nbytes + self.oovv.nbytes + self.oooo.nbytes
+        """Bytes of the Gram blocks and of the pair-space operator of this multiplicity
+        (use_eri)."""
+        op = sum(s[-1] for s in operator_strips(self.nocc, self.nvir, self.multi))
+        return sum(g.nbytes for g in self.eri_gram) + op

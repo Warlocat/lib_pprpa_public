@@ -86,7 +86,8 @@ on the GPU — about 4 orders of magnitude faster per Davidson solve (≈0.3 s v
    - `lib_pprpa.pprpa_eri_gpu` — `attach_gpu_eri_contraction(mp, vvvv, oovv, oooo)`
      swaps the Davidson matvec to GEMMs with the pp-RPA pair-space operator, built
      from the Gram blocks at the first product (or straight from ao2mo with
-     `gpu_ao2mo_pair_operator(..., multi)`); `pack_eri` converts physicist tensors.
+     `gpu_ao2mo_pair_operator(..., multi)`); `lib_pprpa.pair_operator.pack_eri`
+     converts physicist tensors, and the CPU `use_eri` path runs on the same operator.
 2. **Memory at scale.** The packed blocks stay on the device when they fit 75%
    of its memory and are otherwise streamed in row chunks per Davidson iteration;
    the 216-atom NV cell at AS=300 (49 GB packed) is resident on one H200 or B200.

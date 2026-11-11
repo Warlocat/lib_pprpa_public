@@ -10,6 +10,8 @@ of through the driver's bounce buffer (about 6x on a B200).
 import numpy as np
 import cupy as cp
 
+from lib_pprpa.pair_operator import pack_offset
+
 __all__ = ['FFT_BATCH_MIN', 'pack_offset', 'eri_bytes', 'free_bytes', 'plan_budget',
            'empty_pinned', 'is_pinned', 'max_fft_batch']
 
@@ -47,13 +49,6 @@ def plan_budget(free):
     '''Bytes a planner may fill out of ``free`` device bytes, after the workspace reserve.'''
     free = int(free)
     return max(0, free - max(_RESERVE_MIN, int(_RESERVE_FRAC * free)))
-
-
-def pack_offset(n):
-    '''Offset of row ``n`` of a packed lower triangle, n (n + 1) / 2: the number
-    of pairs p >= q of n orbitals, and the length of an n-row triangle.'''
-    n = int(n)
-    return n * (n + 1) // 2
 
 
 def eri_bytes(nocc, nvir):

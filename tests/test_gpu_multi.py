@@ -71,7 +71,8 @@ def test_ao2mo_two_workers_match_one(diamond):
 @pytest.mark.parametrize("multi", ("s", "t"))
 def test_split_mvp_matches_resident(diamond, multi):
     from lib_pprpa.pprpa_davidson import ppRPA_Davidson, _pprpa_contraction
-    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, pack_eri, release_gpu_eri
+    from lib_pprpa.pair_operator import pack_eri
+    from lib_pprpa.pprpa_eri_gpu import attach_gpu_eri_contraction, release_gpu_eri
     rng = np.random.default_rng(3)
     nocc, nvir = 5, 7
     # real orbitals on a grid: the packed form assumes every ERI symmetry
