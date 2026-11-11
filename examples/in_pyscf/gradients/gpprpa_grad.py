@@ -41,7 +41,6 @@ def pprpaobj(mf, nfrozen_occ, vir_cut):
     nocc, mo_energy, Lpq = get_pyscf_input_mol(mf, nocc_act=nocc, nvir_act=nvir_act)
     # pprpa = GppRPA_direct(nocc, mo_energy, Lpq, nelec="n-2", hh_state=0, pp_state=5)
     pprpa = GppRPA_Davidson(nocc, mo_energy, Lpq, channel="hh", nroot=5, residue_thresh=1e-10, trial="subspace")
-    pprpa._use_Lov = True
     pprpa.mu = 0.0
     return pprpa
 
