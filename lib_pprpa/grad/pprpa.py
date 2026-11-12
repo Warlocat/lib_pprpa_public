@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 from functools import reduce
 from scipy.linalg import block_diag
@@ -477,6 +479,29 @@ def make_rdm1_relaxed_rhf_pprpa(
     i_int = i_int + i_int.T
 
     return den_relaxed, i_int
+
+
+# chkfile key of the CPHF solution (not the SCF's chkfile: pyscf's dump_scf rewrites that
+# file at every SCF)
+_CPHF_KEY = 'pprpa_cphf'
+
+
+def load_cphf_x0(chkfile, mult, state):
+    """The AO-basis CPHF solution :func:`save_cphf_x0` wrote to ``chkfile`` for the pp-RPA
+    state (``mult``, ``state``); None when the file, the record or the state differ."""
+    if not os.path.isfile(chkfile):
+        return None
+    rec = lib.chkfile.load(chkfile, _CPHF_KEY)
+    if rec is None or bool(rec['triplet']) != (mult == 't') or int(rec['state']) != state:
+        return None
+    return np.asarray(rec['x0'])
+
+
+def save_cphf_x0(chkfile, x0, mult, state):
+    """Store an AO-basis CPHF solution (``cphf_x0_out['cphf_x0_ao']``) in ``chkfile`` with
+    the state it belongs to, replacing an earlier one."""
+    lib.chkfile.save(chkfile, _CPHF_KEY,
+                     {'x0': np.asarray(x0), 'triplet': int(mult == 't'), 'state': state})
 
 
 class Gradients(rhf_grad.Gradients):

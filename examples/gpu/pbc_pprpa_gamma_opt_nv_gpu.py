@@ -28,9 +28,8 @@ Example:
 
 Restart: a rerun in the same directory resumes.  The geometry is the last frame
 of opt.traj, the BFGS Hessian comes from bfgs.pkl (ASE's restart file), every
-SCF starts from the orbitals of the previous geometry in scf.chk, and the CPHF
-solution of the previous step seeds the next one within a run.  Delete the three
-files to start over.
+SCF starts from the orbitals of the previous geometry in scf.chk, and every CPHF
+solve from the previous one in cphf.chk.  Delete the four files to start over.
 
 REQUIREMENTS: see examples/gpu/README.md.
 """
@@ -72,7 +71,7 @@ GAMMA   = np.zeros((1, 3))      # pp-RPA is Gamma-point only
 CHK, RESTART, TRAJ = "scf.chk", "bfgs.pkl", "opt.traj"
 DEVICES = None                  # e.g. [0, 1]: dispatch ao2mo, the Davidson ERIs and the
                                 # 2-RDM exchange over these CUDA devices (default: current)
-_state = {"cphf_x0": None}      # CPHF warm start between geometry steps
+CPHF_CHK = "cphf.chk"           # CPHF warm start between geometry steps and runs
 
 # read geometry + lattice from the input file (POSCAR or xyz), or resume
 RESUME = os.path.exists(TRAJ)
@@ -168,10 +167,9 @@ def _pipeline(cell, want_grad):
     g = gpugrad.Gradients(mp, mf, MULT, ISTATE)
     g.cphf_max_cycle = 100
     g.cphf_conv_tol = 1e-7
-    g.cphf_x0 = _state["cphf_x0"]
+    g.cphf_chkfile = CPHF_CHK
     g.devices = DEVICES
     de = g.grad_elec(xy, MULT, range(_NATM)) + g.grad_nuc()
-    _state["cphf_x0"] = g.cphf_x0
     cp.get_default_memory_pool().free_all_blocks()
     return e_state, de
 
