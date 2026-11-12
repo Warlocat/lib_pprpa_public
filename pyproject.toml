@@ -13,7 +13,7 @@ dependencies = [
   "numpy<=2.3",
   "h5py",
   "scipy",
-  "pyscf",
+  "pyscf>=2.13",
 ]
 classifiers = [
   "Programming Language :: Python",
