@@ -123,7 +123,7 @@ def test_ao2mo_blocks_match_pyscf(pair_blk):
     import cupy as cp
     from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
     from lib_pprpa.gpu_mem import is_pinned
-    from lib_pprpa.pprpa_eri_gpu import pack_eri
+    from lib_pprpa.pair_operator import pack_eri
     cell, cocc, cvir, ref = _diamond("gth-dzv")
     got = gpu_ao2mo_blocks(cell, cocc, cvir, cell.mesh, pair_blk=pair_blk)
     for g, r in zip(got, pack_eri(*ref)):

@@ -3,6 +3,7 @@ import numpy
 from pyscf import df, gto, scf
 from pyscf.ao2mo import _ao2mo
 
+from lib_pprpa.pair_operator import gram_from_lpq
 from lib_pprpa.pprpa_davidson import ppRPA_Davidson
 
 mol = gto.Mole()
@@ -23,7 +24,9 @@ nmo = len(mf.mo_energy)
 nocc = mf.mol.nelectron // 2
 nvir = nmo - nocc
 from lib_pprpa.pyscf_util import get_pyscf_input_mol_eri_r
-nocc_act, mo_energy_act, vvvv, oooo, oovv = get_pyscf_input_mol_eri_r(mf, nocc_act=nocc, nvir_act=nvir)
+# packed=True: the Gram triangles use_eri keeps, without the four-index blocks
+nocc_act, mo_energy_act, vvvv, oooo, oovv = get_pyscf_input_mol_eri_r(
+    mf, nocc_act=nocc, nvir_act=nvir, packed=True)
 Lpq = None
 pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq)
 pprpa.use_eri(vvvv, oovv, oooo)
@@ -47,12 +50,9 @@ mo = numpy.asarray(mf.mo_coeff, order='F')
 ijslice = (0, nmo, 0, nmo)
 Lpq = None
 Lpq = _ao2mo.nr_e2(mf.with_df._cderi, mo, ijslice, aosym='s2', out=Lpq)
-Lpq = Lpq.reshape(naux, nmo*nmo)
-eri_raw = numpy.matmul(Lpq.T, Lpq).reshape(nmo,nmo,nmo,nmo)
-eri_raw = eri_raw.transpose(0, 2, 1, 3)
-vvvv = eri_raw[nocc:, nocc:, nocc:, nocc:]
-oooo = eri_raw[:nocc, :nocc, :nocc, :nocc]
-oovv = eri_raw[:nocc, :nocc, nocc:, nocc:]
+Lpq = Lpq.reshape(naux, nmo, nmo)
+# the packed Gram triangles straight from Lpq, without the four-index blocks
+vvvv, oovv, oooo = gram_from_lpq(Lpq, nocc)
 pprpa = ppRPA_Davidson(nocc, mf.mo_energy, Lpq)
 pprpa.use_eri(vvvv, oovv, oooo)
 pprpa.kernel("s")
