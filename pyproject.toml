@@ -24,6 +24,33 @@ classifiers = [
 [project.optional-dependencies]
 ase = ["ase"]
 socutils = ["socutils"]
+# What the GPU modules need besides gpu4pyscf itself, which is built from source at commit
+# d65bd284 + a66c7c4 (examples/gpu/README.md): no release has the APIs they use.  gpu: gpu4pyscf's own
+# requirements for a CUDA 12 toolkit on the system; gpu-cuda13: the same with the CUDA 13
+# libraries as wheels (cuBLAS 13 for the fp64 emulation).
+gpu = [
+  "cupy-cuda12x>=13.0,!=13.4.0",
+  "gpu4pyscf-libxc-cuda12x==0.8.1",
+  "pyscf-dispersion",
+  "geometric",
+  "packaging",
+]
+gpu-cuda13 = [
+  "cupy-cuda13x==14.2.0",
+  "gpu4pyscf-libxc-cuda13x==0.8.1",
+  "pyscf-dispersion",
+  "geometric",
+  "packaging",
+  "cutensor-cu13",
+  "nvidia-cublas",
+  "nvidia-cuda-runtime",
+  "nvidia-cuda-nvrtc",
+  "nvidia-nvjitlink",
+  "nvidia-cufft",
+  "nvidia-curand",
+  "nvidia-cusolver",
+  "nvidia-cusparse",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
