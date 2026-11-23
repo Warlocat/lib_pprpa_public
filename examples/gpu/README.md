@@ -41,17 +41,23 @@ MO-eri    (large):  lib_pprpa.gpu_ao2mo.gpu_ao2mo_blocks  -> active-space vvvv/o
 - **lib_pprpa** on `PYTHONPATH`.
 - A GPU (the small example fits in any modern GPU; NV-scale needs ~32-80 GB).
 
-## Restarts
+## Restarts and reuse
+Each stage of a force can start from an earlier run; converged results do not
+change.
 
-A rerun of either optimization script in the same directory resumes: the
-geometry comes from the last frame of `opt.traj`, the BFGS Hessian from
-`bfgs.pkl` (ASE's own restart file; `ase_utils.kernel` passes `restart=`,
-`trajectory=` and `append_trajectory=` through), and every SCF starts from the
-orbitals of the previous geometry in `scf.chk` (PySCF's checkpoint).  The CPHF
-solution of the previous step seeds the next one within a run
-(`Gradients.cphf_x0`).  ASE writes the Hessian before the trajectory frame, so
-a kill between the two repeats one step on resume.  Delete the three files to
-start over.
+| Stage | Kept in | Read back by |
+|---|---|---|
+| geometry, BFGS Hessian | `opt.traj`, `bfgs.pkl` (ASE) | `ase_utils.kernel(restart=, trajectory=, append_trajectory=)` |
+| SCF orbitals | `scf.chk` (`mf.chkfile`) | `scf_guess` in the examples, as `dm0` |
+| Davidson trial vectors | `ppRPA_Davidson(checkpoint_file=)` | the same `checkpoint_file` |
+| CPHF solution | `Gradients.cphf_x0`, `Gradients.cphf_chkfile` | the next solve of the same multiplicity and state |
+
+- A rerun of either optimization script resumes from `opt.traj`, `bfgs.pkl`,
+  `scf.chk` and `cphf.chk`; delete them to start over.
+- Keep `cphf_chkfile` apart from the SCF's chkfile, which pyscf's `dump_scf`
+  rewrites at every SCF.
+- Other roots of the same Davidson need only their own
+  `Gradients(mp, mf, mult, istate)`, with no second SCF or Davidson.
 
 ## gpu4pyscf source patch (hybrid functionals at large systems)
 The exchange terms of the pp-RPA gradient (the 2-RDM exchange of the relaxed

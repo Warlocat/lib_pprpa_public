@@ -173,6 +173,29 @@ def test_grad_elec_matches_cpu_and_warm_start(system, mult):
     assert np.abs(de_warm - de_gpu).max() < 1e-9 * scale
 
 
+def test_cphf_chkfile_carries_the_warm_start_to_a_new_run(system, tmp_path, monkeypatch):
+    from lib_pprpa.grad import pprpa_gamma_gpu as gpu
+    from lib_pprpa.grad.pprpa import load_cphf_x0
+    cell, mf, nocc, _ = system
+    mp, xy = _solve(system, "t")
+    chk = str(tmp_path / "run.chk")
+    loaded = []
+    monkeypatch.setattr(gpu, "load_cphf_x0",
+                        lambda *a: loaded.append(load_cphf_x0(*a)) or loaded[-1])
+    de = []
+    for _ in range(2):
+        g = gpu.Gradients(mp, mf, "t", 0)
+        g.cphf_conv_tol = 1e-10
+        g.cphf_max_cycle = 100
+        g.cphf_chkfile = chk
+        de.append(g.grad_elec(xy, "t", range(cell.natm)))
+        assert np.array_equal(load_cphf_x0(chk, "t", 0), g.cphf_x0)
+    # the first run found no record, the second started from the first's solution
+    assert loaded[0] is None and loaded[1] is not None
+    assert np.abs(de[1] - de[0]).max() < 1e-9 * np.abs(de[0]).max()
+    assert load_cphf_x0(chk, "s", 0) is None
+
+
 # omega = 1 / bohr: on this cell's mesh the long-range kernel keeps most of its weight
 # (at HSE06's 0.11 it is ~exp(-35) at the smallest G and the test could not tell)
 @pytest.mark.parametrize("xc", ("0.25*SR_HF(1.0) + 0.75*PBE, PBE",
