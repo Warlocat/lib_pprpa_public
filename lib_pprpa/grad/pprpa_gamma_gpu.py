@@ -43,7 +43,7 @@ import numpy as np
 import cupy as cp
 from scipy.linalg import block_diag
 
-from lib_pprpa.grad.pprpa import load_cphf_x0, make_rdm1_relaxed_rhf_pprpa, save_cphf_x0
+from lib_pprpa.grad.pprpa import make_rdm1_relaxed_warm
 from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import _contract_xc_kernel as _cxk_gpu
@@ -196,19 +196,7 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
     pair_k = pair_exchange(cell, cell.mesh, Wp)
     de_pairing = pairing_k_force_lowrank(cell, cell.mesh, orbp, Mp, W=Wp)
     Wp = None
-    cphf_out = {}
-    chk = pprpa_grad.cphf_chkfile
-    x0 = pprpa_grad.cphf_x0
-    if x0 is None and chk:
-        x0 = load_cphf_x0(chk, mult, pprpa_grad.state)
-    P_mo, W_mo = make_rdm1_relaxed_rhf_pprpa(
-        pprpa, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
-        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
-        pair_k=pair_k,
-        cphf_x0=x0, cphf_x0_out=cphf_out)
-    pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
-    if chk and pprpa_grad.cphf_x0 is not None:
-        save_cphf_x0(chk, pprpa_grad.cphf_x0, mult, pprpa_grad.state)
+    P_mo, W_mo = make_rdm1_relaxed_warm(pprpa_grad, mf, xy, mult, vresp=vresp, pair_k=pair_k)
     W = mo @ W_mo @ mo.T \
         - kg_cpu.make_rdm1e(kmf_cpu.mo_energy, kmf_cpu.mo_coeff, kmf_cpu.mo_occ)[0]
     P = mo @ P_mo @ mo.T
@@ -300,12 +288,6 @@ class Gradients(_cpu.Gradients):
 
     def __init__(self, pprpa, mf, mult="t", state=0):
         super().__init__(pprpa, mf, mult=mult, state=state)
-        # AO-basis CPHF solution of the previous evaluation, used as the
-        # initial guess for the next one.  See make_rdm1_relaxed_rhf_pprpa.
-        self.cphf_x0 = None
-        # chkfile the solution is saved to after each solve and read from when cphf_x0
-        # is None (same mult and state only): the warm start of a later run
-        self.cphf_chkfile = None
         # CUDA devices the pair-potential FFT pass (relaxed-density exchange and
         # pairing force) is dispatched over; None is the current device.
         self.devices = None

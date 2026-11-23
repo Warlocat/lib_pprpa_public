@@ -26,7 +26,7 @@ from lib_pprpa.grad import pprpa_gamma as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
 from lib_pprpa.grad.grad_utils_gpu_pbc import relaxed_xc_gradient as _xcg_gpu
 from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
-from lib_pprpa.grad.pprpa import load_cphf_x0, make_rdm1_relaxed_rhf_pprpa, save_cphf_x0
+from lib_pprpa.grad.pprpa import make_rdm1_relaxed_warm
 from lib_pprpa.grad.pprpa_gamma_gpu import make_gpu_vresp
 from lib_pprpa.pbc_gdf import validate_gdf_context, validate_gdf_mf
 
@@ -225,23 +225,8 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
             exxdiv=None)
         return cp.asnumpy(vk)
 
-    # Optional CPHF warm start across geometry steps.  A caller that keeps the
-    # Gradients object (or copies the attribute onto the next one) gets the
-    # previous solution as the initial guess, cphf_chkfile that of an earlier run;
-    # the converged solution does not depend on the guess.
-    cphf_out = {}
-    chk = pprpa_grad.cphf_chkfile
-    x0 = pprpa_grad.cphf_x0
-    if x0 is None and chk:
-        x0 = load_cphf_x0(chk, mult, pprpa_grad.state)
-    p_mo, w_mo = make_rdm1_relaxed_rhf_pprpa(
-        pprpa, mf, xy=xy, mult=mult,
-        cphf_max_cycle=pprpa_grad.cphf_max_cycle,
-        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=vresp,
-        pair_get_k=pair_get_k, cphf_x0=x0, cphf_x0_out=cphf_out)
-    pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
-    if chk and pprpa_grad.cphf_x0 is not None:
-        save_cphf_x0(chk, pprpa_grad.cphf_x0, mult, pprpa_grad.state)
+    p_mo, w_mo = make_rdm1_relaxed_warm(pprpa_grad, mf, xy, mult, vresp=vresp,
+                                        pair_get_k=pair_get_k)
 
     w = mo @ w_mo @ mo.T - kg_cpu.make_rdm1e(
         kmf_cpu.mo_energy, kmf_cpu.mo_coeff, kmf_cpu.mo_occ)[0]
@@ -311,12 +296,6 @@ class Gradients(_cpu.Gradients):
         # evaluations does not rebuild them every time.
         self.gpu_df = gpu_df
         self.gpu_grids = gpu_grids
-        # AO-basis CPHF solution of the previous evaluation, used as the
-        # initial guess for the next one.  See make_rdm1_relaxed_rhf_pprpa.
-        self.cphf_x0 = None
-        # chkfile the solution is saved to after each solve and read from when cphf_x0
-        # is None (same mult and state only): the warm start of a later run
-        self.cphf_chkfile = None
         self.base = pprpa
         self.mol = mf.cell
         self.cell = mf.cell

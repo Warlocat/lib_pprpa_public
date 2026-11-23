@@ -504,14 +504,40 @@ def save_cphf_x0(chkfile, x0, mult, state):
                      {'x0': np.asarray(x0), 'triplet': int(mult == 't'), 'state': state})
 
 
+def make_rdm1_relaxed_warm(pprpa_grad, mf, xy, mult, **kwargs):
+    """``make_rdm1_relaxed_rhf_pprpa`` for ``pprpa_grad.base`` with the CPHF settings and
+    warm start of ``pprpa_grad``: the solve starts from ``cphf_x0`` or, when that is None,
+    from the ``cphf_chkfile`` record of this state, and its solution becomes ``cphf_x0``
+    and, with ``cphf_chkfile``, that record.  ``kwargs`` (vresp, pair_get_k, pair_k) go
+    to ``make_rdm1_relaxed_rhf_pprpa``."""
+    chk = pprpa_grad.cphf_chkfile
+    x0 = pprpa_grad.cphf_x0
+    if x0 is None and chk:
+        x0 = load_cphf_x0(chk, mult, pprpa_grad.state)
+    out = {}
+    dens = make_rdm1_relaxed_rhf_pprpa(
+        pprpa_grad.base, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
+        cphf_conv_tol=pprpa_grad.cphf_conv_tol, cphf_x0=x0, cphf_x0_out=out, **kwargs)
+    pprpa_grad.cphf_x0 = out.get('cphf_x0_ao')
+    if chk and pprpa_grad.cphf_x0 is not None:
+        save_cphf_x0(chk, pprpa_grad.cphf_x0, mult, pprpa_grad.state)
+    return dens
+
+
 class Gradients(rhf_grad.Gradients):
     # GMRES raises past it; NV63 and NV215 converge to 1e-8 in 16-18 responses
     cphf_max_cycle = 100
     cphf_conv_tol = 1e-8
+    # The CPHF warm start of the drivers that use make_rdm1_relaxed_warm: the AO-basis
+    # solution of the last solve, and a chkfile it is also saved to (same state only).
+    cphf_x0 = None
+    cphf_chkfile = None
 
     _keys = {
         'cphf_max_cycle',
         'cphf_conv_tol',
+        'cphf_x0',
+        'cphf_chkfile',
         'mol',
         'base',
         'chkfile',

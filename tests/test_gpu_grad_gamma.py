@@ -174,13 +174,14 @@ def test_grad_elec_matches_cpu_and_warm_start(system, mult):
 
 
 def test_cphf_chkfile_carries_the_warm_start_to_a_new_run(system, tmp_path, monkeypatch):
+    from lib_pprpa.grad import pprpa as grad_pprpa
     from lib_pprpa.grad import pprpa_gamma_gpu as gpu
     from lib_pprpa.grad.pprpa import load_cphf_x0
     cell, mf, nocc, _ = system
     mp, xy = _solve(system, "t")
     chk = str(tmp_path / "run.chk")
     loaded = []
-    monkeypatch.setattr(gpu, "load_cphf_x0",
+    monkeypatch.setattr(grad_pprpa, "load_cphf_x0",
                         lambda *a: loaded.append(load_cphf_x0(*a)) or loaded[-1])
     de = []
     for _ in range(2):
