@@ -169,7 +169,7 @@ def grad_elec_mf(mf, atmlst=None):
 
 def make_rdm1_relaxed_rhf_pprpa(
         pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20,
-        cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None,
+        cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None, pair_k=None,
         cphf_x0=None, cphf_x0_out=None):
     r"""Calculate relaxed density matrix (and the I intermediates)
         for given pprpa and mean-field object.
@@ -177,12 +177,16 @@ def make_rdm1_relaxed_rhf_pprpa(
         pprpa: a pprpa object.
         mf: a mean-field RHF/RKS object.
         pair_get_k: optional callback ``pair_get_k(dms, hermi)`` for direct
-            exchange contractions of the two active pair densities.  This
+            exchange contractions of the active pair density X + Y (a stack
+            of one (nao, nao) matrix; one entry per matrix returned).  This
             avoids reconstructing full-system three-index factors when the
             solver uses a compact active space.  A callback with a true
             ``accepts_ket`` attribute is called as ``pair_get_k(dms, hermi,
             ket=orbp)`` and returns ``K @ orbp`` (nao, nact): only those
             columns are ever used.
+        pair_k: optional K[X + Y] @ orbp (nao, nact), the exchange of the active
+            pair density on the active orbitals, when the caller already has it;
+            pair_get_k is then not called.
     Args:
         cphf_x0: optional AO-basis initial guess for the CPHF solution, as
             returned through ``cphf_x0_out`` by an earlier call.  Along a
@@ -234,31 +238,30 @@ def make_rdm1_relaxed_rhf_pprpa(
     orba = mf.mo_coeff[:, slice_a]
     occ_y_mat, vir_x_mat = get_xy_full(
         xy, oo_dim, mult, nocc=nocc, nvir=nvir)
-    use_pair_eri = pprpa._use_eri or pprpa._ao_direct or pair_get_k is not None
-    if pprpa._use_eri and pair_get_k is None and not hasattr(mf, 'cell'):
+    use_pair_eri = (pprpa._use_eri or pprpa._ao_direct or pair_get_k is not None
+                    or pair_k is not None)
+    if pprpa._use_eri and pair_get_k is None and pair_k is None and not hasattr(mf, 'cell'):
         # molecular fast path: contract 2-RDM with stored MO ERIs directly
         _, mo_ene_full, eri_full = pyscf_util.get_pyscf_input_mol_eri_r(mf, return_raw=True)
         eri_oo = np.ascontiguousarray(eri_full[:, slice_p, slice_i, slice_i])
         eri_vv = np.ascontiguousarray(eri_full[:, slice_p, slice_a, slice_a])
         eri_full = None
-        X_eri = np.matmul(eri_vv.reshape(-1, nvir*nvir), vir_x_mat.reshape(-1)).reshape(-1, nocc+nvir)
-        Y_eri = np.matmul(eri_oo.reshape(-1, nocc*nocc), occ_y_mat.reshape(-1)).reshape(-1, nocc+nvir)
+        xy_eri = (np.matmul(eri_vv.reshape(-1, nvir*nvir), vir_x_mat.reshape(-1))
+                  + np.matmul(eri_oo.reshape(-1, nocc*nocc), occ_y_mat.reshape(-1))
+                  ).reshape(-1, nocc+nvir)
     elif use_pair_eri:
-        hermi = 1 if mult == 's' else 2
         mo_ene_full = mf.mo_energy
-        X_ao = orba @ vir_x_mat @ orba.T
-        Y_ao = orbi @ occ_y_mat @ orbi.T
-        pair_dms = np.stack((X_ao, Y_ao))
-        if pair_get_k is None:
-            X_eri, Y_eri = mf.get_k(dm=pair_dms, hermi=hermi)
-            X_eri, Y_eri = X_eri @ orbp, Y_eri @ orbp
-        elif getattr(pair_get_k, 'accepts_ket', False):
-            X_eri, Y_eri = pair_get_k(pair_dms, hermi=hermi, ket=orbp)
-        else:
-            X_eri, Y_eri = pair_get_k(pair_dms, hermi=hermi)
-            X_eri, Y_eri = X_eri @ orbp, Y_eri @ orbp
-        X_eri = mf.mo_coeff.T @ X_eri
-        Y_eri = mf.mo_coeff.T @ Y_eri
+        if pair_k is None:
+            # contraction_2rdm_eri takes K[X] + K[Y]: one exchange of the pair density X + Y
+            hermi = 1 if mult == 's' else 2
+            pair_dms = (orba @ vir_x_mat @ orba.T + orbi @ occ_y_mat @ orbi.T)[None]
+            if pair_get_k is None:
+                pair_k = mf.get_k(dm=pair_dms, hermi=hermi)[0] @ orbp
+            elif getattr(pair_get_k, 'accepts_ket', False):
+                pair_k = pair_get_k(pair_dms, hermi=hermi, ket=orbp)[0]
+            else:
+                pair_k = pair_get_k(pair_dms, hermi=hermi)[0] @ orbp
+        xy_eri = mf.mo_coeff.T @ pair_k
     else:
         if nfrozen_occ > 0 or nfrozen_vir > 0 or pprpa.Lpq is None:
             # A periodic GDF solver has the same Lpq algebra as molecular DF,
@@ -298,7 +301,7 @@ def make_rdm1_relaxed_rhf_pprpa(
         )
     else:
         i_prime[slice_p, slice_p] += contraction_2rdm_eri(
-            occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
+            occ_y_mat, vir_x_mat, xy_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
         )
     i_prime[slice_a, slice_i] += veff_den_u[slice_a, slice_i]
     i_prime[slice_p, slice_p] += e_act[:, None] * den_u
@@ -311,7 +314,7 @@ def make_rdm1_relaxed_rhf_pprpa(
             )
         else:
             i_prime[slice_ap, slice_p] += contraction_2rdm_eri(
-                occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
+                occ_y_mat, vir_x_mat, xy_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
             )
         i_prime[slice_ap, slice_i] += veff_den_u[slice_ap, slice_i]
     if nfrozen_occ > 0:
@@ -322,7 +325,7 @@ def make_rdm1_relaxed_rhf_pprpa(
             )
         else:
             i_prime[slice_ip, slice_p] += contraction_2rdm_eri(
-                occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
+                occ_y_mat, vir_x_mat, xy_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
             )
         # I' all virtual-frozen occupied block
         i_prime[slice_A, slice_ip] += veff_den_u[slice_A, slice_ip]

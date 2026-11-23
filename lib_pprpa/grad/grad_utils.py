@@ -654,7 +654,8 @@ def contraction_2rdm_Lpq(occ_y_mat, vir_x_mat, Lpq_full, nocc, nvir, nfrozen_occ
 
     return out
 
-def contraction_2rdm_eri(occ_y_mat, vir_x_mat, eri_X, eri_Y, nocc, nvir, nfrozen_occ, nfrozen_vir, label1, label2):
+def contraction_2rdm_eri(occ_y_mat, vir_x_mat, eri_xy, nocc, nvir, nfrozen_occ, nfrozen_vir,
+                         label1, label2):
     r"""
     Contraction in the form of (anti-symmetrized or symmetrized)
         I_{tp} = \sum_{qrsP} XY_{pq}^* XY_{rs} \langle tq|rs \rangle
@@ -665,8 +666,8 @@ def contraction_2rdm_eri(occ_y_mat, vir_x_mat, eri_X, eri_Y, nocc, nvir, nfrozen
     Args:
         occ_y_mat: coefficients for occupied orbitals Y
         vir_x_mat: coefficients for virtual orbitals X
-        eri_X: \sum_{cd} X_{cd} \langle tq|cd \rangle (nall, nact)
-        eri_Y: \sum_{kl} Y_{kl} \langle tq|kl \rangle (nall, nact)
+        eri_xy: \sum_{cd} X_{cd} \langle tq|cd \rangle + \sum_{kl} Y_{kl} \langle tq|kl \rangle
+            (nall, nact), the exchange of the one pair density X + Y
         nocc: number of active occupied orbitals.
         nvir: number of active virtual orbitals.
         nfrozen_occ: number of frozen occupied orbitals.
@@ -702,16 +703,16 @@ def contraction_2rdm_eri(occ_y_mat, vir_x_mat, eri_X, eri_Y, nocc, nvir, nfrozen
     else:
         n1 = nocc + nvir
     if label2 == 'i':
-        tmp = np.ascontiguousarray(eri_Y[slice1, :nocc] + eri_X[slice1, :nocc])  # (t,j)
+        tmp = np.ascontiguousarray(eri_xy[slice1, :nocc])  # (t,j)
         out = np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(i,j) -> (t,i)
     elif label2 == 'a':
-        tmp = np.ascontiguousarray(eri_Y[slice1, nocc:] + eri_X[slice1, nocc:])  # (t,b)
+        tmp = np.ascontiguousarray(eri_xy[slice1, nocc:])  # (t,b)
         out = np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(a,b) -> (t,a)
     elif label2 == 'p':
         out = np.zeros((n1, nocc + nvir), dtype=occ_y_mat.dtype)
-        tmp = np.ascontiguousarray(eri_Y[slice1, :nocc] + eri_X[slice1, :nocc])  # (t,j)
+        tmp = np.ascontiguousarray(eri_xy[slice1, :nocc])  # (t,j)
         out[:,:nocc] = np.matmul(tmp, occ_y_mat.T.conj())  # (t,j)(i,j) -> (t,i)
-        tmp = np.ascontiguousarray(eri_Y[slice1, nocc:] + eri_X[slice1, nocc:])  # (t,b)
+        tmp = np.ascontiguousarray(eri_xy[slice1, nocc:])  # (t,b)
         out[:,nocc:] = np.matmul(tmp, vir_x_mat.T.conj())  # (t,b)(a,b) -> (t,a)
     else:
         raise ValueError('label2 = {}. is not valid in contraction_2rdm_Lpq'.format(label2))
