@@ -170,6 +170,12 @@ export LD_LIBRARY_PATH=$CU/lib:$SP/cutensor/lib:$LD_LIBRARY_PATH
 - List the `nvidia-*` runtime wheels explicitly: installing only cupy leaves out
   cuSOLVER and nvJitLink, `import gpu4pyscf` fails, and pytest then skips
   every GPU test.
+- The CUDA 13 wheels need an NVIDIA driver of 580 or newer.  On an older one
+  (570 supports CUDA 12.8 at most) every CUDA call fails with
+  `cudaErrorInsufficientDriver`.  NVIDIA's forward-compatibility package for the
+  toolkit (`cuda-compat-13-x`, unpacked in user space; data-center GPUs such as
+  the A100 only) supplies a newer `libcuda`: put its `compat` directory first on
+  `LD_LIBRARY_PATH`, before the wheels' `nvidia/cu13/lib`.
 - Do not set `CUBLAS_EMULATE_DOUBLE_PRECISION`: it emulates every DGEMM in the
   process and slows the SCF and CPHF.  Leave `CUPY_ACCELERATORS` unset as well
   (cuTENSOR 2.8.1 rejects a strided accumulate in `gpu_pairing_force`).
