@@ -160,6 +160,12 @@ export LD_LIBRARY_PATH=$CU/lib:$SP/cutensor/lib:$LD_LIBRARY_PATH
   here; the `gpu4pyscf-libxc-cuda13x` wheel provides it) uses it, so a
   `gfortran` must be on the path (on a cluster, from a GCC module).  Keep the
   system `gcc`/`g++` so the libraries need only the system `libstdc++`.
+- Build on the system where the libraries run: they take the build host's
+  glibc, so a build on a glibc 2.34 system (RHEL 9) does not load on a glibc
+  2.28 one (RHEL 8).  There, `libsolvent` built with a module's newer `gfortran`
+  also needs that compiler's runtime, which the system lacks: copy its
+  `libgfortran.so.5` and `libquadmath.so.0` into `gpu4pyscf/lib/deps/lib`, on
+  the libraries' RPATH.
 - `nvidia-cuda-cccl` provides `cub/cub.cuh`, which the `nvcc` wheel lacks.
 - gpu4pyscf loads cuSOLVER through `find_library('cusolver')`, which needs the
   unversioned `libcusolver.so` on `LD_LIBRARY_PATH`; the wheel ships only
