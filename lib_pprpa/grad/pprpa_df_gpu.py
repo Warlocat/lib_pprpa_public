@@ -15,7 +15,7 @@ from gpu4pyscf.grad.rhf import contract_h1e_dm
 
 from lib_pprpa.grad import pprpa as _cpu
 from lib_pprpa.grad.grad_utils import get_xy_full
-from lib_pprpa.grad.pprpa import make_rdm1_relaxed_rhf_pprpa
+from lib_pprpa.grad.pprpa import make_rdm1_relaxed_warm
 
 __all__ = ['Grad', 'Gradients', 'grad_elec', 'make_gpu_vresp']
 
@@ -55,12 +55,8 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
         return mf.get_k(mol, cp.asarray(dms), hermi=hermi).get()
 
     # The relaxed-density algebra is on (nmo, nmo) host matrices; it reads only the orbitals.
-    cphf_out = {}
-    p_mo, w_mo = make_rdm1_relaxed_rhf_pprpa(
-        pprpa, mf.to_cpu(), xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
-        cphf_conv_tol=pprpa_grad.cphf_conv_tol, vresp=make_gpu_vresp(mf),
-        pair_get_k=pair_get_k, cphf_x0=pprpa_grad.cphf_x0, cphf_x0_out=cphf_out)
-    pprpa_grad.cphf_x0 = cphf_out.get('cphf_x0_ao')
+    p_mo, w_mo = make_rdm1_relaxed_warm(pprpa_grad, mf.to_cpu(), xy, mult,
+                                        vresp=make_gpu_vresp(mf), pair_get_k=pair_get_k)
 
     gpu_grad = mf.nuc_grad_method()
     mo = cp.asarray(mf.mo_coeff)
@@ -106,8 +102,6 @@ def grad_elec(pprpa_grad, xy, mult, atmlst=None):
 class Gradients(_cpu.Gradients):
     """pp-RPA gradient for a ``make_pprpa_df_gpu`` solver and its gpu4pyscf DF reference."""
 
-    _keys = _cpu.Gradients._keys | {'cphf_x0'}
-
     def __init__(self, pprpa, mf, mult='t', state=0):
         if getattr(mf, 'with_df', None) is None:
             raise TypeError('the GPU molecular pp-RPA gradient needs a density-fitted reference')
@@ -117,8 +111,6 @@ class Gradients(_cpu.Gradients):
         self.state = state
         self.verbose = self.mol.verbose
         self.mult = mult
-        # AO-basis CPHF solution of the previous evaluation, the next one's initial guess
-        self.cphf_x0 = None
         self.rdm1e = None
         self.atmlst = None
         self.de = None

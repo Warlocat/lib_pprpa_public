@@ -1,6 +1,6 @@
 """Multi-device dispatch: two ranks on one GPU (run one after another) must
 reproduce the single-device ao2mo blocks, the split-resident Davidson product,
-the low-rank exchange and the full gradient."""
+the pair potential and the full gradient."""
 
 import numpy as np
 import pytest
@@ -58,7 +58,6 @@ def diamond():
 
 def test_ao2mo_two_workers_match_one(diamond):
     from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
-    from lib_pprpa.gpu_mem import is_pinned
     cell, mf = diamond
     nocc = cell.nelectron // 2
     cocc, cvir = mf.mo_coeff[:, :nocc], mf.mo_coeff[:, nocc:]
@@ -107,17 +106,25 @@ def test_split_mvp_matches_resident(diamond, multi):
     assert not hasattr(gpu, "_gpu_eri")
 
 
-def test_lowrank_k_two_workers_match_one(diamond):
-    from lib_pprpa.gpu_fft_k import get_k_lowrank
+@pytest.mark.parametrize("store_phil", (True, False))
+def test_pair_potential_two_workers_match_one(diamond, store_phil):
+    from scipy.linalg import block_diag
+    from lib_pprpa.gpu_pairing_force import pair_potential_lowrank, pairing_k_force_lowrank
     cell, mf = diamond
-    rng = np.random.default_rng(5)
-    nao = cell.nao
-    factors = [(rng.standard_normal((nao, 3)), rng.standard_normal((nao, 3))),
-               (rng.standard_normal((nao, 5)), rng.standard_normal((nao, 5)))]
-    ket = mf.mo_coeff[:, :7]
-    one = get_k_lowrank(cell, cell.mesh, factors, ket=ket)
-    two = get_k_lowrank(cell, cell.mesh, factors, ket=ket, devices=TWO)
-    assert np.abs(two - one).max() < 1e-12 * np.abs(one).max()
+    rng = np.random.default_rng(6)
+    nocc = cell.nelectron // 2
+    x = rng.standard_normal((cell.nao - nocc,) * 2)
+    y = rng.standard_normal((nocc, nocc))
+    M = block_diag(y - y.T, x - x.T)
+    one = pair_potential_lowrank(cell, cell.mesh, mf.mo_coeff, M, store_phil=store_phil)
+    two = pair_potential_lowrank(cell, cell.mesh, mf.mo_coeff, M, store_phil=store_phil,
+                                 devices=TWO)
+    assert two.device == one.device
+    assert float(abs(two - one).max()) < 1e-12 * float(abs(one).max())
+    f_one = pairing_k_force_lowrank(cell, cell.mesh, mf.mo_coeff, M, W=one)
+    f_two = pairing_k_force_lowrank(cell, cell.mesh, mf.mo_coeff, M, store_phil=store_phil,
+                                    devices=TWO)
+    assert np.abs(f_two - f_one).max() < 1e-10 * np.abs(f_one).max()
 
 
 def test_gradient_two_workers_match_one(diamond):

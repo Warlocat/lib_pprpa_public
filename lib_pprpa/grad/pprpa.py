@@ -1,6 +1,9 @@
+import os
+
 import numpy as np
 from functools import reduce
 from scipy.linalg import block_diag
+from scipy.sparse.linalg import LinearOperator, gmres
 from pyscf import lib, scf
 from pyscf.df.df_jk import _DFHF
 from pyscf.lib import logger
@@ -168,22 +171,35 @@ def grad_elec_mf(mf, atmlst=None):
 
 
 def make_rdm1_relaxed_rhf_pprpa(
-        pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=20,
-        cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None,
+        pprpa, mf, xy=None, mult='t', istate=0, cphf_max_cycle=100,
+        cphf_conv_tol=1.0e-8, vresp=None, pair_get_k=None, pair_k=None,
         cphf_x0=None, cphf_x0_out=None):
     r"""Calculate relaxed density matrix (and the I intermediates)
         for given pprpa and mean-field object.
     Args:
         pprpa: a pprpa object.
         mf: a mean-field RHF/RKS object.
+        vresp: optional response ``vresp(dm)`` -> (J + fxc + hyb K)[dm] (default
+            ``mf.gen_response(singlet=None, hermi=1)``).  A response with a true
+            ``accepts_ket`` attribute is called in the CPHF iterations as
+            ``vresp(dm, ket=orbI)`` and returns ``vresp(dm) @ orbI`` (nao, nocc_all):
+            only those columns are ever used.
         pair_get_k: optional callback ``pair_get_k(dms, hermi)`` for direct
-            exchange contractions of the two active pair densities.  This
+            exchange contractions of the active pair density X + Y (a stack
+            of one (nao, nao) matrix; one entry per matrix returned).  This
             avoids reconstructing full-system three-index factors when the
             solver uses a compact active space.  A callback with a true
             ``accepts_ket`` attribute is called as ``pair_get_k(dms, hermi,
             ket=orbp)`` and returns ``K @ orbp`` (nao, nact): only those
             columns are ever used.
+        pair_k: optional K[X + Y] @ orbp (nao, nact), the exchange of the active
+            pair density on the active orbitals, when the caller already has it;
+            pair_get_k is then not called.
     Args:
+        cphf_conv_tol: relative residual |b - (1 + A) x| / |b| at which the
+            CPHF (GMRES) solve stops.
+        cphf_max_cycle: response evaluations allowed; RuntimeError if
+            cphf_conv_tol is not reached within them.
         cphf_x0: optional AO-basis initial guess for the CPHF solution, as
             returned through ``cphf_x0_out`` by an earlier call.  Along a
             geometry optimization the previous step's solution is a good
@@ -234,31 +250,30 @@ def make_rdm1_relaxed_rhf_pprpa(
     orba = mf.mo_coeff[:, slice_a]
     occ_y_mat, vir_x_mat = get_xy_full(
         xy, oo_dim, mult, nocc=nocc, nvir=nvir)
-    use_pair_eri = pprpa._use_eri or pprpa._ao_direct or pair_get_k is not None
-    if pprpa._use_eri and pair_get_k is None and not hasattr(mf, 'cell'):
+    use_pair_eri = (pprpa._use_eri or pprpa._ao_direct or pair_get_k is not None
+                    or pair_k is not None)
+    if pprpa._use_eri and pair_get_k is None and pair_k is None and not hasattr(mf, 'cell'):
         # molecular fast path: contract 2-RDM with stored MO ERIs directly
         _, mo_ene_full, eri_full = pyscf_util.get_pyscf_input_mol_eri_r(mf, return_raw=True)
         eri_oo = np.ascontiguousarray(eri_full[:, slice_p, slice_i, slice_i])
         eri_vv = np.ascontiguousarray(eri_full[:, slice_p, slice_a, slice_a])
         eri_full = None
-        X_eri = np.matmul(eri_vv.reshape(-1, nvir*nvir), vir_x_mat.reshape(-1)).reshape(-1, nocc+nvir)
-        Y_eri = np.matmul(eri_oo.reshape(-1, nocc*nocc), occ_y_mat.reshape(-1)).reshape(-1, nocc+nvir)
+        xy_eri = (np.matmul(eri_vv.reshape(-1, nvir*nvir), vir_x_mat.reshape(-1))
+                  + np.matmul(eri_oo.reshape(-1, nocc*nocc), occ_y_mat.reshape(-1))
+                  ).reshape(-1, nocc+nvir)
     elif use_pair_eri:
-        hermi = 1 if mult == 's' else 2
         mo_ene_full = mf.mo_energy
-        X_ao = orba @ vir_x_mat @ orba.T
-        Y_ao = orbi @ occ_y_mat @ orbi.T
-        pair_dms = np.stack((X_ao, Y_ao))
-        if pair_get_k is None:
-            X_eri, Y_eri = mf.get_k(dm=pair_dms, hermi=hermi)
-            X_eri, Y_eri = X_eri @ orbp, Y_eri @ orbp
-        elif getattr(pair_get_k, 'accepts_ket', False):
-            X_eri, Y_eri = pair_get_k(pair_dms, hermi=hermi, ket=orbp)
-        else:
-            X_eri, Y_eri = pair_get_k(pair_dms, hermi=hermi)
-            X_eri, Y_eri = X_eri @ orbp, Y_eri @ orbp
-        X_eri = mf.mo_coeff.T @ X_eri
-        Y_eri = mf.mo_coeff.T @ Y_eri
+        if pair_k is None:
+            # contraction_2rdm_eri takes K[X] + K[Y]: one exchange of the pair density X + Y
+            hermi = 1 if mult == 's' else 2
+            pair_dms = (orba @ vir_x_mat @ orba.T + orbi @ occ_y_mat @ orbi.T)[None]
+            if pair_get_k is None:
+                pair_k = mf.get_k(dm=pair_dms, hermi=hermi)[0] @ orbp
+            elif getattr(pair_get_k, 'accepts_ket', False):
+                pair_k = pair_get_k(pair_dms, hermi=hermi, ket=orbp)[0]
+            else:
+                pair_k = pair_get_k(pair_dms, hermi=hermi)[0] @ orbp
+        xy_eri = mf.mo_coeff.T @ pair_k
     else:
         if nfrozen_occ > 0 or nfrozen_vir > 0 or pprpa.Lpq is None:
             # A periodic GDF solver has the same Lpq algebra as molecular DF,
@@ -298,7 +313,7 @@ def make_rdm1_relaxed_rhf_pprpa(
         )
     else:
         i_prime[slice_p, slice_p] += contraction_2rdm_eri(
-            occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
+            occ_y_mat, vir_x_mat, xy_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'p', 'p'
         )
     i_prime[slice_a, slice_i] += veff_den_u[slice_a, slice_i]
     i_prime[slice_p, slice_p] += e_act[:, None] * den_u
@@ -311,7 +326,7 @@ def make_rdm1_relaxed_rhf_pprpa(
             )
         else:
             i_prime[slice_ap, slice_p] += contraction_2rdm_eri(
-                occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
+                occ_y_mat, vir_x_mat, xy_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ap', 'p'
             )
         i_prime[slice_ap, slice_i] += veff_den_u[slice_ap, slice_i]
     if nfrozen_occ > 0:
@@ -322,7 +337,7 @@ def make_rdm1_relaxed_rhf_pprpa(
             )
         else:
             i_prime[slice_ip, slice_p] += contraction_2rdm_eri(
-                occ_y_mat, vir_x_mat, X_eri, Y_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
+                occ_y_mat, vir_x_mat, xy_eri, nocc, nvir, nfrozen_occ, nfrozen_vir, 'ip', 'p'
             )
         # I' all virtual-frozen occupied block
         i_prime[slice_A, slice_ip] += veff_den_u[slice_A, slice_ip]
@@ -374,21 +389,26 @@ def make_rdm1_relaxed_rhf_pprpa(
         orbI_gpu = cupy.asarray(orbI)
     nresponse = [0]
 
+    accepts_ket = getattr(vresp, 'accepts_ket', False)
+
     def fvind(x):
         nresponse[0] += 1
         shape = (nvir + nfrozen_vir, nocc + nfrozen_occ)
         if use_device:
             xd = cupy.asarray(x.reshape(shape)) * 2
             dm = orbA_gpu @ xd @ orbI_gpu.T
+            if accepts_ket:
+                return cupy.asnumpy(orbA_gpu.T @ vresp(dm + dm.T, ket=orbI_gpu)).ravel()
             v1ao = vresp(dm + dm.T)
             return cupy.asnumpy(orbA_gpu.T @ v1ao @ orbI_gpu).ravel()
         dm = reduce(np.dot, (orbA, x.reshape(shape) * 2, orbI.T))
+        if accepts_ket:
+            return (orbA.T @ vresp(dm + dm.T, ket=orbI)).ravel()
         v1ao = vresp(dm + dm.T)
         return reduce(np.dot, (orbA.T, v1ao, orbI)).ravel()
 
-    # pyscf.scf.cphf.solve does not forward an initial guess to lib.krylov, so
-    # solve_nos1 is inlined here to pass one.  With x0 None the arithmetic is
-    # identical to cphf.solve.
+    # pyscf.scf.cphf.solve's equations (solve_nos1), solved here so that an initial guess
+    # and a residual-based stop can be passed.
     x0 = None
     if cphf_x0 is not None and cphf_x0.shape == (mf.mol.nao, mf.mol.nao):
         # The AO basis is not orthogonal, so C^T D C is not the inverse of
@@ -411,9 +431,17 @@ def make_rdm1_relaxed_rhf_pprpa(
         v = v.reshape(-1, nvir_all, nocc_all_) * e_ai
         return v.reshape(-1, nvir_all * nocc_all_)
 
-    mo1 = lib.krylov(vind_vo, mo1base.reshape(-1, nvir_all * nocc_all_),
-                     x0=None if x0 is None else x0.reshape(-1, nvir_all * nocc_all_),
-                     tol=cphf_conv_tol, max_cycle=cphf_max_cycle, hermi=False)
+    # (1 + A) x = b stopped at |b - (1 + A) x| <= cphf_conv_tol |b|.  lib.krylov stops on
+    # the absolute size of its newest subspace vector instead, and so in practice runs to
+    # machine precision whatever the tolerance.
+    nvo = nvir_all * nocc_all_
+    op = LinearOperator((nvo, nvo), dtype=mo1base.dtype,
+                        matvec=lambda v: v + vind_vo(v).ravel())
+    mo1, info = gmres(op, mo1base.ravel(), x0=None if x0 is None else x0.ravel(),
+                      rtol=cphf_conv_tol, atol=0.0, restart=cphf_max_cycle, maxiter=1)
+    if info != 0:
+        raise RuntimeError('CPHF did not converge to %g in %d iterations'
+                           % (cphf_conv_tol, cphf_max_cycle))
     d_prime[slice_A, slice_I] = mo1.reshape(nvir + nfrozen_vir, nocc + nfrozen_occ)
 
     # Hand the solution back in the AO basis: between geometry steps the MO
@@ -453,13 +481,63 @@ def make_rdm1_relaxed_rhf_pprpa(
     return den_relaxed, i_int
 
 
+# chkfile key of the CPHF solution (not the SCF's chkfile: pyscf's dump_scf rewrites that
+# file at every SCF)
+_CPHF_KEY = 'pprpa_cphf'
+
+
+def load_cphf_x0(chkfile, mult, state):
+    """The AO-basis CPHF solution :func:`save_cphf_x0` wrote to ``chkfile`` for the pp-RPA
+    state (``mult``, ``state``); None when the file, the record or the state differ."""
+    if not os.path.isfile(chkfile):
+        return None
+    rec = lib.chkfile.load(chkfile, _CPHF_KEY)
+    if rec is None or bool(rec['triplet']) != (mult == 't') or int(rec['state']) != state:
+        return None
+    return np.asarray(rec['x0'])
+
+
+def save_cphf_x0(chkfile, x0, mult, state):
+    """Store an AO-basis CPHF solution (``cphf_x0_out['cphf_x0_ao']``) in ``chkfile`` with
+    the state it belongs to, replacing an earlier one."""
+    lib.chkfile.save(chkfile, _CPHF_KEY,
+                     {'x0': np.asarray(x0), 'triplet': int(mult == 't'), 'state': state})
+
+
+def make_rdm1_relaxed_warm(pprpa_grad, mf, xy, mult, **kwargs):
+    """``make_rdm1_relaxed_rhf_pprpa`` for ``pprpa_grad.base`` with the CPHF settings and
+    warm start of ``pprpa_grad``: the solve starts from ``cphf_x0`` or, when that is None,
+    from the ``cphf_chkfile`` record of this state, and its solution becomes ``cphf_x0``
+    and, with ``cphf_chkfile``, that record.  ``kwargs`` (vresp, pair_get_k, pair_k) go
+    to ``make_rdm1_relaxed_rhf_pprpa``."""
+    chk = pprpa_grad.cphf_chkfile
+    x0 = pprpa_grad.cphf_x0
+    if x0 is None and chk:
+        x0 = load_cphf_x0(chk, mult, pprpa_grad.state)
+    out = {}
+    dens = make_rdm1_relaxed_rhf_pprpa(
+        pprpa_grad.base, mf, xy=xy, mult=mult, cphf_max_cycle=pprpa_grad.cphf_max_cycle,
+        cphf_conv_tol=pprpa_grad.cphf_conv_tol, cphf_x0=x0, cphf_x0_out=out, **kwargs)
+    pprpa_grad.cphf_x0 = out.get('cphf_x0_ao')
+    if chk and pprpa_grad.cphf_x0 is not None:
+        save_cphf_x0(chk, pprpa_grad.cphf_x0, mult, pprpa_grad.state)
+    return dens
+
+
 class Gradients(rhf_grad.Gradients):
-    cphf_max_cycle = 20
+    # GMRES raises past it; NV63 and NV215 converge to 1e-8 in 16-18 responses
+    cphf_max_cycle = 100
     cphf_conv_tol = 1e-8
+    # The CPHF warm start of the drivers that use make_rdm1_relaxed_warm: the AO-basis
+    # solution of the last solve, and a chkfile it is also saved to (same state only).
+    cphf_x0 = None
+    cphf_chkfile = None
 
     _keys = {
         'cphf_max_cycle',
         'cphf_conv_tol',
+        'cphf_x0',
+        'cphf_chkfile',
         'mol',
         'base',
         'chkfile',

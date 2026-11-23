@@ -1,7 +1,7 @@
 '''Opt-in dispatch of independent GPU tasks over several CUDA devices.
 
 The kernels that use it are strip loops whose tasks are independent: ao2mo pair
-strips, ket rows of the low-rank exchange, row ranges of the resident ERIs.
+strips, FFT batches of the pairing potential, row ranges of the resident ERIs.
 Each device runs one thread that pulls tasks from a shared list; the per-rank
 state (MO grids, buffers) is built on the device by a ``setup`` callback, so
 nothing is copied between devices.  Two threads on one device are not safe

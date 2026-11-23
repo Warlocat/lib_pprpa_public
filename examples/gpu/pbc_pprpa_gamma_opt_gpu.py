@@ -21,7 +21,8 @@ Run:
     python pbc_pprpa_gamma_opt_gpu.py s          # lowest singlet
 
 A rerun in the same directory resumes from the last frame of opt.traj with the
-BFGS Hessian in bfgs.pkl and the SCF orbitals in scf.chk (see README.md).
+BFGS Hessian in bfgs.pkl, the SCF orbitals in scf.chk and the CPHF solution in
+cphf.chk (see README.md).
 """
 import os
 import sys
@@ -50,7 +51,7 @@ FMAX     = 0.05          # eV/Ang convergence
 MAXSTEPS = 15
 KPTS     = np.zeros((1, 3))     # Gamma point
 CHK, RESTART, TRAJ = "scf.chk", "bfgs.pkl", "opt.traj"
-_state   = {"cphf_x0": None}    # CPHF warm start between geometry steps
+CPHF_CHK = "cphf.chk"           # CPHF warm start between geometry steps and runs
 
 
 def build_cell(coords=None):
@@ -120,12 +121,11 @@ def _pipeline(cell, want_grad):
         cp.get_default_memory_pool().free_all_blocks()
         return e_state
 
-    # 4) GPU Gamma-point gradient (low-rank exchange of the pair densities built in)
+    # 4) GPU Gamma-point gradient
     xy = (mp.xy_s if MULT == "s" else mp.xy_t)[ISTATE]
     g = gpugrad.Gradients(mp, mf, MULT, ISTATE)
-    g.cphf_x0 = _state["cphf_x0"]
+    g.cphf_chkfile = CPHF_CHK
     de = g.grad_elec(xy, MULT, range(cell.natm)) + g.grad_nuc()
-    _state["cphf_x0"] = g.cphf_x0
     cp.get_default_memory_pool().free_all_blocks()
     return e_state, de
 
