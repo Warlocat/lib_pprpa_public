@@ -50,7 +50,7 @@ def _cpu_solver(mf_cpu, mult, **kw):
 def test_gram_blocks_match_cpu_factors(act):
     import cupy as cp
     from lib_pprpa.mol_df_gpu import df_gram_blocks, get_pyscf_input_mol_gpu
-    from lib_pprpa.pprpa_eri_gpu import pack_eri
+    from lib_pprpa.pair_operator import pack_eri
     from lib_pprpa.pyscf_util import get_pyscf_input_mol
 
     mf, mf_cpu = _scf("pbe")
