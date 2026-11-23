@@ -177,6 +177,11 @@ def make_rdm1_relaxed_rhf_pprpa(
     Args:
         pprpa: a pprpa object.
         mf: a mean-field RHF/RKS object.
+        vresp: optional response ``vresp(dm)`` -> (J + fxc + hyb K)[dm] (default
+            ``mf.gen_response(singlet=None, hermi=1)``).  A response with a true
+            ``accepts_ket`` attribute is called in the CPHF iterations as
+            ``vresp(dm, ket=orbI)`` and returns ``vresp(dm) @ orbI`` (nao, nocc_all):
+            only those columns are ever used.
         pair_get_k: optional callback ``pair_get_k(dms, hermi)`` for direct
             exchange contractions of the active pair density X + Y (a stack
             of one (nao, nao) matrix; one entry per matrix returned).  This
@@ -382,15 +387,21 @@ def make_rdm1_relaxed_rhf_pprpa(
         orbI_gpu = cupy.asarray(orbI)
     nresponse = [0]
 
+    accepts_ket = getattr(vresp, 'accepts_ket', False)
+
     def fvind(x):
         nresponse[0] += 1
         shape = (nvir + nfrozen_vir, nocc + nfrozen_occ)
         if use_device:
             xd = cupy.asarray(x.reshape(shape)) * 2
             dm = orbA_gpu @ xd @ orbI_gpu.T
+            if accepts_ket:
+                return cupy.asnumpy(orbA_gpu.T @ vresp(dm + dm.T, ket=orbI_gpu)).ravel()
             v1ao = vresp(dm + dm.T)
             return cupy.asnumpy(orbA_gpu.T @ v1ao @ orbI_gpu).ravel()
         dm = reduce(np.dot, (orbA, x.reshape(shape) * 2, orbI.T))
+        if accepts_ket:
+            return (orbA.T @ vresp(dm + dm.T, ket=orbI)).ravel()
         v1ao = vresp(dm + dm.T)
         return reduce(np.dot, (orbA.T, v1ao, orbI)).ravel()
 

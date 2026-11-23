@@ -2,8 +2,9 @@
 
 Drop-in GPU counterpart of ``lib_pprpa.grad.pprpa_gamma``.  The relaxed 1-RDM /
 energy-weighted density is built by the CPU routine ``make_rdm1_relaxed_rhf_pprpa``
-(small MO-space block algebra) but driven by a GPU response (``make_gpu_vresp``),
-so the CPHF/Z-vector solve runs on the GPU; the gradient *assembly* (hcore,
+(small MO-space block algebra) but driven by a GPU response (``make_gpu_vresp``:
+J inside the fxc pass, only the occupied columns for the CPHF iterations), so the
+CPHF/Z-vector solve runs on the GPU; the gradient *assembly* (hcore,
 overlap, J/K, Vxc, fxc, pseudo-potential) also runs on the GPU.
 
 Term -> gpu4pyscf primitive map (D=KS ref dm, P=relaxed corr dm, T=D+P,
@@ -49,7 +50,19 @@ from lib_pprpa.gpu_emulation import emulation_available, fp64_emulation
 from lib_pprpa.gpu_mem import pooled
 from lib_pprpa.gpu_pairing_force import (pair_exchange, pair_potential_lowrank,
                                          pairing_k_force_lowrank)
+from lib_pprpa.gpu_response import fused_response
 from lib_pprpa.grad.hcore_contracted import hcore_deriv_contracted
+
+
+def _fused_applies(kmf):
+    '''``gpu_response.fused_response`` covers this KRKS: KNumInt on its uniform grids, FFTDF J,
+    LDA/GGA without exact exchange.'''
+    from gpu4pyscf.pbc.df.fft import FFTDF
+    from gpu4pyscf.pbc.dft.numint import KNumInt
+    ni = kmf._numint
+    return (type(ni) is KNumInt and type(kmf.with_df) is FFTDF
+            and kmf.j_engine is None
+            and ni._xc_type(kmf.xc) in ('LDA', 'GGA') and not ni.libxc.is_hybrid_xc(kmf.xc))
 
 
 def _aftdf(cell, kpts):
@@ -61,14 +74,15 @@ def _aftdf(cell, kpts):
 
 
 def make_gpu_vresp(cell, mf, gpu_mf=None, emulate=True):
-    """Native GPU CPHF response (``singlet=None, hermi=1``) for Gamma KS.
+    """GPU CPHF response (``singlet=None, hermi=1``) for Gamma KS.
 
-    The native ``KRKS.gen_response`` object caches the XC kernel once and then
-    applies ``J + fxc`` (and the hybrid exchange response) throughout the CPHF
-    solve.  This adapter only adds/removes the Gamma k-point axes and converts
-    between the CPU CPHF solver's NumPy arrays and CuPy.  With ``emulate`` the
-    response runs under cuBLAS's ``performant`` fp64 emulation where the device
-    gains from it (``gpu_emulation``).
+    LDA/GGA on the uniform-grid KNumInt with FFTDF J run as ``gpu_response.fused_response``
+    (J inside the fxc pass, and with ``ket`` only V @ ket, the columns the CPHF iterations
+    use); everything else (hybrids, MGGA, GDF, other integrators) runs gpu4pyscf's
+    ``KRKS.gen_response``.  Both cache the XC kernel once.  ``vresp(dm, ket=None)``:
+    NumPy in -> NumPy out, CuPy in -> CuPy out.  With
+    ``emulate`` the response runs under cuBLAS's ``performant`` fp64 emulation where the
+    device gains from it (``gpu_emulation``).
     """
     from gpu4pyscf.pbc import dft as gdft
 
@@ -109,11 +123,18 @@ def make_gpu_vresp(cell, mf, gpu_mf=None, emulate=True):
     if kmf.grids.coords is None:
         kmf.grids.build()
 
-    native_vresp = kmf.gen_response(singlet=None, hermi=1)
     nao = cell.nao
     strategy = 'performant' if emulate and emulation_available('performant') else None
+    if _fused_applies(kmf):
+        respond = fused_response(cell, kmf)
+    else:
+        native_vresp = kmf.gen_response(singlet=None, hermi=1)
 
-    def vresp(dm):
+        def respond(dmg, ket=None):
+            v = native_vresp(dmg.reshape(1, 1, nao, nao))[0, 0]
+            return v if ket is None else v @ ket
+
+    def vresp(dm, ket=None):
         # Return CuPy when handed CuPy so a device-resident CPHF loop can avoid
         # round-tripping the (nao, nao) matrices through the host every
         # iteration.  NumPy in -> NumPy out, unchanged, for every other caller.
@@ -123,10 +144,11 @@ def make_gpu_vresp(cell, mf, gpu_mf=None, emulate=True):
             raise ValueError(
                 f"Gamma CPHF response expects ({nao}, {nao}); got {dmg.shape}")
         with fp64_emulation(strategy):
-            v = native_vresp(dmg.reshape(1, 1, nao, nao))
-        return v[0, 0] if want_device else cp.asnumpy(v[0, 0])
+            v = respond(dmg, None if ket is None else cp.asarray(ket))
+        return v if want_device else cp.asnumpy(v)
 
     vresp.accepts_device_arrays = True
+    vresp.accepts_ket = True
     return vresp
 
 
