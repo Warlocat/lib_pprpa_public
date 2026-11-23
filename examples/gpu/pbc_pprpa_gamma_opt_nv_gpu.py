@@ -32,6 +32,10 @@ SCF starts from the orbitals of the previous geometry in scf.chk, and the CPHF
 solution of the previous step seeds the next one within a run.  Delete the three
 files to start over.
 
+Overlap threshold: OVERLAP_THRESHOLD = 1e-9 instead of gpu4pyscf's 1e-6 keeps the
+whole AO basis; dropping its near-linear dependencies puts the forces ~2e-4 eV/A
+off finite differences.
+
 REQUIREMENTS: see examples/gpu/README.md.
 """
 import sys, os
@@ -44,6 +48,7 @@ from pyscf.lib import chkfile
 from pyscf.pbc import gto, dft as cdft
 from pyscf.pbc.tools.pyscf_ase import pyscf_to_ase_atoms
 from gpu4pyscf.pbc import dft as gdft
+from gpu4pyscf.scf import hf as gpu_hf
 
 from lib_pprpa.pprpa_davidson import ppRPA_Davidson
 from lib_pprpa.gpu_ao2mo import gpu_ao2mo_blocks
@@ -69,10 +74,13 @@ BASIS   = "gth-dzvp"
 PSEUDO  = "gth-pbe"
 NROOT   = max(5, ISTATE + 1)
 GAMMA   = np.zeros((1, 3))      # pp-RPA is Gamma-point only
+OVERLAP_THRESHOLD = 1e-9        # keeps the whole AO basis (see the docstring)
 CHK, RESTART, TRAJ = "scf.chk", "bfgs.pkl", "opt.traj"
 DEVICES = None                  # e.g. [0, 1]: dispatch ao2mo, the Davidson ERIs and the
                                 # 2-RDM exchange over these CUDA devices (default: current)
 _state = {"cphf_x0": None}      # CPHF warm start between geometry steps
+
+gpu_hf.overlap_zero_eigenvalue_threshold = OVERLAP_THRESHOLD
 
 # read geometry + lattice from the input file (POSCAR or xyz), or resume
 RESUME = os.path.exists(TRAJ)
@@ -194,6 +202,9 @@ if __name__ == "__main__":
     print(f"### NV-style GPU Gamma pp-RPA opt: {cell.natm} atoms, nao={cell.nao}, "
           f"mesh={list(cell.mesh)}, ke={KE} Ha, channel={CHANNEL}, mult={MULT}, "
           f"AS={AS}{', resumed from ' + TRAJ if RESUME else ''} ###", flush=True)
+    s_min = np.linalg.eigvalsh(cell.pbc_intor("int1e_ovlp")).min()
+    print(f"smallest overlap eigenvalue {s_min:.2e} "
+          f"(SCF threshold {OVERLAP_THRESHOLD:.0e})", flush=True)
     converged, cell_opt = ase_utils.kernel(
         cell, grad_func=grad_func, ene_func=ene_func,
         logfile="opt_ase.log", fmax=FMAX, max_steps=MAXSTEPS,

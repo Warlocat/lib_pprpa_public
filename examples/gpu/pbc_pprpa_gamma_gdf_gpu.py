@@ -17,6 +17,7 @@ import sys
 
 import numpy as np
 from pyscf.pbc import df, dft, gto
+from pyscf.scf import hf as mol_hf
 
 from lib_pprpa.grad.pprpa_gamma_gdf_gpu import Gradients
 from lib_pprpa.pbc_gdf import make_pprpa_gdf
@@ -25,6 +26,10 @@ from lib_pprpa.pbc_gdf import make_pprpa_gdf
 MULT = sys.argv[1] if len(sys.argv) > 1 else "t"
 if MULT not in ("s", "t"):
     raise SystemExit("multiplicity must be 's' or 't'")
+
+# 1e-9 instead of the default 1e-6 keeps the whole AO basis: dropping its near-linear
+# dependencies puts the forces ~2e-4 eV/A off finite differences (README.md).
+mol_hf.overlap_zero_eigenvalue_threshold = 1e-9
 
 cell = gto.Cell()
 cell.atom = [

@@ -188,6 +188,12 @@ export LD_LIBRARY_PATH=$CU/lib:$SP/cutensor/lib:$LD_LIBRARY_PATH
   algebra); the 2-RDM exchange (`gpu_fft_k.pair_get_k_lowrank`, from the low-rank
   factors of the pair densities) and the response run on the GPU.
 
+## Overlap threshold
+The force examples set `gpu4pyscf.scf.hf.overlap_zero_eigenvalue_threshold`
+(`pyscf.scf.hf.overlap_zero_eigenvalue_threshold` for a CPU reference) to 1e-9
+instead of the default 1e-6 to keep the whole AO basis.  Dropping its near-linear
+dependencies puts the analytical forces ~2e-4 eV/A off finite differences.
+
 ## Fully GDF-consistent path
 
 `pbc_pprpa_gamma_gdf_gpu.py` is a separate backend. Construct a converged CPU

@@ -14,6 +14,10 @@ printed below.  Along an optimization it is also worth projecting the residual
 net force out, since a small uniform component otherwise translates the whole
 cell.
 
+The script sets gpu4pyscf.scf.hf.overlap_zero_eigenvalue_threshold to 1e-9 instead
+of 1e-6 to keep the whole AO basis: dropping its near-linear dependencies puts the
+forces ~2e-4 eV/A off finite differences.
+
 Successive evaluations can reuse the previous CPHF solution.  Gradients
 carries it in the AO basis as .cphf_x0; assign it onto the next Gradients
 object (or keep the same one) and the solver iterates only on the correction,
@@ -37,6 +41,7 @@ from pyscf.pbc import df, dft, gto
 
 from gpu4pyscf.pbc import dft as gdft
 from gpu4pyscf.pbc.df.df import GDF as GPU_GDF
+from gpu4pyscf.scf import hf as gpu_hf
 
 from lib_pprpa.grad.pprpa_gamma_gdf_gpu import Gradients
 from lib_pprpa.pbc_gdf import make_pprpa_gdf
@@ -61,6 +66,12 @@ cell.spin = 0
 cell.verbose = 4
 cell.build()
 assert cell.nelectron % 2 == 0, 'the pp-RPA reference must be closed shell'
+
+# keep the whole AO basis in the SCF (see the docstring)
+gpu_hf.overlap_zero_eigenvalue_threshold = 1e-9
+print('smallest overlap eigenvalue %.2e (SCF threshold %.0e)'
+      % (np.linalg.eigvalsh(cell.pbc_intor('int1e_ovlp')).min(),
+         gpu_hf.overlap_zero_eigenvalue_threshold))
 
 kpts = np.zeros((1, 3))
 

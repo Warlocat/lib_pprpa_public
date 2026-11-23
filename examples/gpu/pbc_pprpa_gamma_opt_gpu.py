@@ -31,6 +31,7 @@ from pyscf.lib import chkfile
 from pyscf.pbc import gto, dft as cdft
 from pyscf.pbc.tools.pyscf_ase import pyscf_to_ase_atoms
 from gpu4pyscf.pbc import dft as gdft
+from gpu4pyscf.scf import hf as gpu_hf
 
 from ase.io import read
 from ase.io.extxyz import write_extxyz
@@ -49,8 +50,11 @@ NROOT    = 2
 FMAX     = 0.05          # eV/Ang convergence
 MAXSTEPS = 15
 KPTS     = np.zeros((1, 3))     # Gamma point
+OVERLAP_THRESHOLD = 1e-9        # keeps the whole AO basis (see the notes at the bottom)
 CHK, RESTART, TRAJ = "scf.chk", "bfgs.pkl", "opt.traj"
 _state   = {"cphf_x0": None}    # CPHF warm start between geometry steps
+
+gpu_hf.overlap_zero_eigenvalue_threshold = OVERLAP_THRESHOLD
 
 
 def build_cell(coords=None):
@@ -166,4 +170,7 @@ if __name__ == "__main__":
 #   * for the energy solve, the MO-eri path (GPU FFT ao2mo + batched use_eri
 #     contraction) is much faster than AO-direct at large active spaces
 #   * hybrid functionals at large nao / fine mesh need the aft_jk blksize patch — see README.md
+#   * OVERLAP_THRESHOLD: 1e-9 instead of gpu4pyscf's 1e-6 keeps the whole AO basis;
+#     dropping its near-linear dependencies puts the forces ~2e-4 eV/A off finite
+#     differences (README.md)
 # ---------------------------------------------------------------------------
