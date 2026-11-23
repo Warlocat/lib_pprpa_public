@@ -179,6 +179,54 @@ def test_fused_ao2mo_operator_matches_cpu(multi, pair_blk, devices):
 
 @needs_gpu
 @pytest.mark.parametrize("multi", ("s", "t"))
+def test_operator_resumes_from_chkdir(multi, tmp_path, monkeypatch):
+    """A build whose strip files are partly missing (or cut off mid-write) reads the rest
+    and builds only the missing rows, with any strip width; once every row is on disk
+    nothing is built; a chkdir of another operator is refused."""
+    from test_gpu_ao2mo import _diamond
+    from lib_pprpa import gpu_ao2mo
+    from lib_pprpa.pprpa_eri_gpu import (attach_gpu_eri_contraction, gpu_ao2mo_pair_operator,
+                                            release_gpu_eri)
+    cell, cocc, cvir, _ = _diamond("gth-dzv")
+    nocc = cocc.shape[1]
+    rng = np.random.default_rng(9)
+    moe = np.sort(rng.standard_normal(nocc + cvir.shape[1]))
+    tv = rng.standard_normal((4, _solver(nocc, moe, multi).full_dim))
+
+    def products(op):
+        gpu = _solver(nocc, moe, multi)
+        attach_gpu_eri_contraction(gpu, op)
+        out = gpu.contraction(tv)
+        release_gpu_eri(gpu)
+        return out
+
+    expect = products(gpu_ao2mo_pair_operator(cell, cocc, cvir, cell.mesh, multi, pair_blk=3))
+    chk = tmp_path / "op"
+    full = gpu_ao2mo_pair_operator(cell, cocc, cvir, cell.mesh, multi, pair_blk=3,
+                                   chkdir=str(chk))
+    np.testing.assert_allclose(products(full), expect, rtol=1e-12, atol=1e-12)
+    files = sorted(chk.glob("*.f8"))
+    assert {f.name.split("_")[0] for f in files} == {"vvvv", "oooo", "oovv"} and len(files) > 6
+    for f in files[::2]:
+        f.unlink()
+    (chk / "vvvv_0_1.f8.part").write_bytes(b"cut")
+    resumed = gpu_ao2mo_pair_operator(cell, cocc, cvir, cell.mesh, multi, pair_blk=7,
+                                      chkdir=str(chk))
+    assert not list(chk.glob("*.part"))
+    np.testing.assert_allclose(products(resumed), expect, rtol=1e-12, atol=1e-12)
+
+    def no_build(*args):
+        raise AssertionError("a strip was built although its file is there")
+    monkeypatch.setattr(gpu_ao2mo, "_strip", no_build)
+    again = gpu_ao2mo_pair_operator(cell, cocc, cvir, cell.mesh, multi, chkdir=str(chk))
+    np.testing.assert_allclose(products(again), expect, rtol=1e-12, atol=1e-12)
+    with pytest.raises(ValueError):
+        gpu_ao2mo_pair_operator(cell, cocc, cvir, cell.mesh, "t" if multi == "s" else "s",
+                                chkdir=str(chk))
+
+
+@needs_gpu
+@pytest.mark.parametrize("multi", ("s", "t"))
 def test_davidson_energies_match_cpu(multi):
     """Full Davidson solve on a diamond cell: streamed pair operator vs the CPU use_eri path."""
     from pyscf.pbc import dft, gto

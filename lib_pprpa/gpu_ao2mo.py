@@ -180,7 +180,11 @@ def _block(per_dev, sel, mesh, name, sink, layout, pair_blk, devices, emulate, l
     nshare = max(devices.count(d) for d in devices)
     with cp.cuda.Device(devices[0]):
         blk, fblk = _plan_strips(layout, ngrid, mesh, pair_blk, nshare, sink.device_bytes(name))
-    tasks = layout.split(0, layout.nA, blk)[::-1]  # high rows own more tiles: first
+    # high rows own more tiles: first
+    tasks = sorted((t for a, b in sink.todo(name, layout.nA) for t in layout.split(a, b, blk)),
+                   reverse=True)
+    if not tasks:
+        return
     emit = sink.prepare(name, tasks)
     nbuf = max(pack_offset(layout.pairs(a, b)[1]) - pack_offset(layout.pairs(a, b)[0])
                for a, b in tasks)
@@ -211,6 +215,9 @@ class _GramSink:
 
     def device_bytes(self, name):
         return 0
+
+    def todo(self, name, nrow):
+        return [(0, nrow)]
 
     def prepare(self, name, tasks):
         out = self.blocks[name] = empty_pinned(pack_offset(self.npair[name]))
@@ -244,7 +251,9 @@ def gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk=None, devices=None, 
     strip to ``sink`` instead of storing the blocks.
 
     ``sink.device_bytes(name)`` is the device memory the sink needs per worker while
-    block ``name`` runs (kept out of the strip plan); ``sink.prepare(name, tasks)`` is
+    block ``name`` runs (kept out of the strip plan); ``sink.todo(name, nrow)`` lists the
+    row ranges [(a, b)] of the block's pair layout to build (the rest the sink already
+    has; an empty list skips the block); ``sink.prepare(name, tasks)`` is
     called on the host with the block's strips [(pa, pb)] of first orbitals (rows of
     the pair layout) and returns ``emit(pa, pb, buf, base)``, which a worker calls on
     its device with the strip's packed Gram rows ``buf`` starting at packed offset

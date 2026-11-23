@@ -9,8 +9,14 @@ rows of those orbitals alone.  ``gpu_ao2mo_pair_operator`` does that to every st
 the FFT ao2mo as it is built, so the Gram blocks are never stored and only M (about 2/3
 of them; B is half of oovv) reaches the host.  ``attach_gpu_eri_contraction`` takes that
 operator, or Gram blocks, which it converts at the first product for the multiplicity
-the solver then has.
+the solver then has.  With ``chkdir`` the operator rows of every finished ao2mo strip are
+also written to disk, so an interrupted build resumes from the strips it had.
 """
+import glob
+import hashlib
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import cupy as cp
 from cupy import cublas
@@ -69,7 +75,7 @@ _B_STRIP = cp.ElementwiseKernel(
 
 
 def gpu_ao2mo_pair_operator(cell, cocc, cvir, mesh, multi, rows=None, pair_blk=None,
-                            devices=None, emulate=True, verbose=None):
+                            devices=None, emulate=True, chkdir=None, verbose=None):
     """The pair-space operator of multiplicity ``multi`` ('s' or 't') straight from the
     FFT ao2mo (``gpu_ao2mo.gpu_ao2mo_strips``): each Gram strip is converted on its
     device and only the operator strips reach the host.
@@ -77,14 +83,24 @@ def gpu_ao2mo_pair_operator(cell, cocc, cvir, mesh, multi, rows=None, pair_blk=N
     Kwargs:
         rows : first orbitals per operator strip; default up to STRIP_ROWS pairs.
         pair_blk, devices, emulate : as for ``gpu_ao2mo.gpu_ao2mo_blocks``.
+        chkdir : directory for the operator rows of each finished ao2mo strip, one file
+            per block and first-orbital range, written while the next strips run.  The
+            ranges already there are read instead of built, so a call interrupted with
+            the same cell, orbitals, mesh, ``multi`` and ``rows`` resumes (with any
+            ``pair_blk`` or devices); a directory holding another operator raises.
     Returns:
         A PairOperator in pinned host memory, for ``attach_gpu_eri_contraction``.
     """
     if multi not in ("s", "t"):
         raise ValueError(f"multi must be 's' or 't', got {multi!r}")
     nocc, nvir = np.asarray(cocc).shape[1], np.asarray(cvir).shape[1]
-    sink = _OperatorSink(nocc, nvir, multi, rows)
-    gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, emulate, verbose)
+    sink = _OperatorSink(nocc, nvir, multi, rows, logger.new_logger(cell, verbose))
+    if chkdir is not None:
+        sink.open_chkdir(chkdir, _operator_key(cell, cocc, cvir, mesh, multi, rows))
+    try:
+        gpu_ao2mo_strips(cell, cocc, cvir, mesh, sink, pair_blk, devices, emulate, verbose)
+    finally:
+        sink.close()
     return PairOperator(nocc, nvir, multi, sink.strips)
 
 
@@ -192,15 +208,99 @@ def _convert_strip(kind, R0, R1, E, base, pairs, nvir, sgn):
     return S
 
 
+def _operator_key(cell, cocc, cvir, mesh, multi, rows):
+    """Digest of everything the operator rows in a strip file depend on."""
+    h = hashlib.sha256()
+    for a in (cell.atom_coords(), cell.lattice_vectors(), cocc, cvir):
+        h.update(np.ascontiguousarray(a, dtype=np.float64).tobytes())
+    h.update(f"{np.asarray(mesh, dtype=int).tolist()} {cell.nao} {multi} {rows} "
+             f"{STRIP_ROWS}".encode())
+    return h.hexdigest()
+
+
 class _OperatorSink:
     """Converts each Gram strip of ``gpu_ao2mo_strips`` into the operator strips over
-    the same first orbitals and keeps those in pinned host memory."""
+    the same first orbitals and keeps those in pinned host memory; with a chkdir it
+    also writes them, one file per ao2mo strip, and reads such files back instead of
+    building their rows again."""
     _KIND = {"vvvv": "vv", "oooo": "oo", "oovv": "ov"}
 
-    def __init__(self, nocc, nvir, multi, rows):
-        self.nocc, self.nvir, self.multi, self.rows = nocc, nvir, multi, rows
+    def __init__(self, nocc, nvir, multi, rows, log):
+        self.nocc, self.nvir, self.multi, self.rows, self.log = nocc, nvir, multi, rows, log
         self.strips = []
         self._pairs = {}
+        self.chkdir = self._writer = None
+        self._writes = []
+
+    def open_chkdir(self, chkdir, key):
+        os.makedirs(chkdir, exist_ok=True)
+        for part in glob.glob(os.path.join(chkdir, "*.part")):     # cut off by the interruption
+            os.remove(part)
+        path = os.path.join(chkdir, "key")
+        if os.path.exists(path):
+            with open(path) as f:
+                if f.read() != key:
+                    raise ValueError(f"{chkdir} holds the strips of another operator "
+                                     "(cell, orbitals, mesh, multi or rows differ)")
+        elif glob.glob(os.path.join(chkdir, "*.f8")):
+            raise ValueError(f"{chkdir} holds strip files without a key")
+        else:
+            with open(path + ".part", "w") as f:
+                f.write(key)
+            os.replace(path + ".part", path)
+        self.chkdir = chkdir
+        self._writer = ThreadPoolExecutor(1)
+
+    def close(self):
+        """Wait for the strip files still being written; a failed write raises here."""
+        if self._writer is None:
+            return
+        try:
+            for w in self._writes:
+                w.result()
+        finally:
+            self._writer.shutdown()
+            self._writer, self._writes = None, []
+
+    def _host_strips(self, kind, pa, pb):
+        n = self.nvir if kind == "vv" else self.nocc
+        return [(R0, R1, empty_pinned((R1 - R0, self._ncol(kind, R1))))
+                for _, _, R0, R1 in row_strips(n, self.multi, self.rows, pa, pb)]
+
+    def _path(self, name, pa, pb):
+        return os.path.join(self.chkdir, f"{name}_{pa}_{pb}.f8")
+
+    def todo(self, name, nrow):
+        """Row ranges of block ``name`` without a strip file; the files are read in."""
+        if self.chkdir is None:
+            return [(0, nrow)]
+        kind = self._KIND[name]
+        done = sorted(tuple(int(x) for x in os.path.basename(p)[:-3].split("_")[1:])
+                      for p in glob.glob(os.path.join(self.chkdir, f"{name}_*_*.f8")))
+        out, a, nbytes = [], 0, 0
+        for pa, pb in done:
+            if pa < a or pb > nrow:
+                raise ValueError(f"{self.chkdir}: strip files of {name} overlap at {pa}-{pb}")
+            if pa > a:
+                out.append((a, pa))
+            a = pb
+            plan = self._host_strips(kind, pa, pb)
+            path = self._path(name, pa, pb)
+            size = sum(host.nbytes for *_, host in plan)
+            if os.path.getsize(path) != size:
+                raise ValueError(f"{path}: {os.path.getsize(path)} bytes, the strips of rows "
+                                 f"{pa}-{pb} take {size}")
+            with open(path, "rb") as f:
+                for R0, R1, host in plan:
+                    f.readinto(host.reshape(-1).view(np.uint8))
+                    self.strips.append((kind, R0, R1, host))
+            nbytes += size
+        if a < nrow:
+            out.append((a, nrow))
+        if done:
+            self.log.info("pair operator %s: %d strip files (%.2f GB) read from %s, rows %s "
+                          "left to build", name, len(done), nbytes / 1e9, self.chkdir, out)
+        return out
 
     def _ncol(self, kind, R1):
         return pair_offset(self.nvir, self.multi) if kind == "ov" else R1
@@ -214,20 +314,19 @@ class _OperatorSink:
 
     def prepare(self, name, tasks):
         kind = self._KIND[name]
-        n = self.nvir if kind == "vv" else self.nocc
         sgn = 1.0 if self.multi == "s" else -1.0
         plan = {}
         for pa, pb in tasks:
-            plan[pa, pb] = []
-            for _, _, R0, R1 in row_strips(n, self.multi, self.rows, pa, pb):
-                host = empty_pinned((R1 - R0, self._ncol(kind, R1)))
-                self.strips.append((kind, R0, R1, host))
-                plan[pa, pb].append((R0, R1, host))
+            plan[pa, pb] = self._host_strips(kind, pa, pb)
+            self.strips.extend((kind, R0, R1, host) for R0, R1, host in plan[pa, pb])
 
         def emit(pa, pb, buf, base):
             pairs = self._device_pairs()
             for R0, R1, host in plan[pa, pb]:
                 _convert_strip(kind, R0, R1, buf, base, pairs, self.nvir, sgn).get(out=host)
+            if self._writer is not None:
+                self._writes.append(self._writer.submit(
+                    _write_strips, self._path(name, pa, pb), [h for *_, h in plan[pa, pb]]))
         return emit
 
     def _device_pairs(self):
@@ -236,6 +335,14 @@ class _OperatorSink:
             self._pairs[dev] = {"oo": _pairs(self.nocc, self.multi),
                                 "vv": _pairs(self.nvir, self.multi)}
         return self._pairs[dev]
+
+
+def _write_strips(path, hosts):
+    """The strips back to back under ``path``, which appears only once complete."""
+    with open(path + ".part", "wb") as f:
+        for host in hosts:
+            f.write(host.reshape(-1).view(np.uint8))
+    os.replace(path + ".part", path)
 
 
 def _convert(blocks, plan, nocc, nvir, multi, host):

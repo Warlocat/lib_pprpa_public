@@ -53,6 +53,15 @@ solution of the previous step seeds the next one within a run
 a kill between the two repeats one step on resume.  Delete the three files to
 start over.
 
+The pair-space operator of the MO-eri path is the longest stage of a large
+force, and `gpu_ao2mo_pair_operator(..., chkdir=)` makes it resumable: the
+operator rows of every finished ao2mo strip go to one file each in `chkdir`,
+written while the next strips run, and a rerun with the same cell, orbitals,
+mesh, multiplicity and `rows` reads them instead of building them again (any
+`pair_blk` or device list).  The directory is keyed on those inputs and raises
+for another operator, so it serves one geometry: remove it once the Davidson
+has its roots, and give each geometry its own.
+
 ## gpu4pyscf source patch (hybrid functionals at large systems)
 The exchange terms of the pp-RPA gradient (the 2-RDM exchange of the relaxed
 density and the pairing force) are built from the low-rank factors of the pair
