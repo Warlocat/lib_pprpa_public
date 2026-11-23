@@ -141,7 +141,7 @@ git -C ~/gpu4pyscf_d65 checkout -b d65bd28-a66c7c4 d65bd284b4802fc5081b199dec710
 git -C ~/gpu4pyscf_d65 cherry-pick -x a66c7c4bd84509c585c3326f15346de755af7b41
 SP=~/venv_cu13/lib/python3.10/site-packages
 CU=$SP/nvidia/cu13
-PATH=$CU/bin:~/venv_cu13/bin:$PATH cmake -S ~/gpu4pyscf_d65/gpu4pyscf/lib -B ~/gpu4pyscf_d65/build     -DBUILD_LIBXC=OFF -DCUDA_ARCHITECTURES="80-real;90-real;100-real" -DCMAKE_BUILD_TYPE=Release     -DCMAKE_CUDA_COMPILER=$CU/bin/nvcc -DCUDAToolkit_ROOT=$CU     -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++     -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++ -DCMAKE_Fortran_COMPILER=$(command -v gfortran)
+PATH=$CU/bin:~/venv_cu13/bin:$PATH cmake -S ~/gpu4pyscf_d65/gpu4pyscf/lib -B ~/gpu4pyscf_d65/build     -DBUILD_LIBXC=OFF -DCUDA_ARCHITECTURES="80-real;90-real;100-real;120-real" -DCMAKE_BUILD_TYPE=Release     -DCMAKE_CUDA_COMPILER=$CU/bin/nvcc -DCUDAToolkit_ROOT=$CU     -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++     -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++ -DCMAKE_Fortran_COMPILER=$(command -v gfortran)
 PATH=$CU/bin:~/venv_cu13/bin:$PATH cmake --build ~/gpu4pyscf_d65/build -j 12
 echo ~/gpu4pyscf_d65 > $SP/gpu4pyscf_d65.pth
 ln -s libcusolver.so.12 $CU/lib/libcusolver.so
@@ -152,8 +152,10 @@ export LD_LIBRARY_PATH=$CU/lib:$SP/cutensor/lib:$LD_LIBRARY_PATH
 - The cherry-pick is upstream #907 (Python only), the fix for the GDF
   gradient running out of device memory in the pair-density exchange: without
   it the 63-atom NV cell (gth-dzvp, naux 5292) OOMs even on a 180 GB B200.
-- `CUDA_ARCHITECTURES` lists the GPUs to run on: `80` A100, `90` H100/H200,
-  `100` B200.  The build takes about 10 min on 12 cores.
+- `CUDA_ARCHITECTURES` lists the GPUs to run on: `80` the A100 and the other
+  compute capability 8.x cards (A40, L40S, RTX 5000 Ada and RTX A5000 run its
+  code), `90` H100/H200, `100` B200, `120` RTX Pro 6000 Blackwell.  One build
+  carries all of them; it takes about 15 min on 12 cores.
 - CMake's `project()` declares Fortran although only the bundled libxc (off
   here; the `gpu4pyscf-libxc-cuda13x` wheel provides it) uses it, so a
   `gfortran` must be on the path (on a cluster, from a GCC module).  Keep the
@@ -172,8 +174,10 @@ export LD_LIBRARY_PATH=$CU/lib:$SP/cutensor/lib:$LD_LIBRARY_PATH
   process and slows the SCF and CPHF.  Leave `CUPY_ACCELERATORS` unset as well
   (cuTENSOR 2.8.1 rejects a strided accumulate in `gpu_pairing_force`).
 - Under CUDA 12 the switch is a no-op, so the same code runs with a CUDA 12
-  build of the same commit.  Hopper gains only on very wide tiles; Blackwell
-  gains from ~800-pair strips up.
+  build of the same commit.  Hopper gains only on very wide tiles; the B200
+  gains from ~800-pair strips up, the RTX Pro 6000 Blackwell (fp64 at 1/64 of
+  fp32) from ~256-wide tiles.  The A100 and the other 8.x cards never gain and
+  stay native.
 
 ## Scope / notes
 - Gamma point, RKS/RHF reference, LDA/GGA/hybrid functionals.
